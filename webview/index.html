@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               img-src 'self' vscode-resource: http://127.0.0.1:3131 data:;
+               style-src 'unsafe-inline' https://fonts.googleapis.com;
+               font-src https://fonts.gstatic.com;
+               script-src 'unsafe-inline' 'unsafe-eval' vscode-resource:;
+               connect-src http://localhost:11434 http://127.0.0.1:3131;"
+    />
+    <title>Jarvix</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="${bundleUri}"></script>
+  </body>
+</html>
