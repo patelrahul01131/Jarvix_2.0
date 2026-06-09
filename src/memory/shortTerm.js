@@ -103,13 +103,16 @@ let userProfileCache = null;
 function getLongTermMemory() {
   if (userProfileCache) return userProfileCache;
   if (!fs.existsSync(PROFILE_FILE)) {
-    return { preferences: [], facts: [] };
+    return { name: "", preferences: [], facts: [] };
   }
   try {
     userProfileCache = JSON.parse(fs.readFileSync(PROFILE_FILE, "utf8"));
+    if (!userProfileCache.name) userProfileCache.name = "";
+    if (!userProfileCache.preferences) userProfileCache.preferences = [];
+    if (!userProfileCache.facts) userProfileCache.facts = [];
     return userProfileCache;
   } catch {
-    return { preferences: [], facts: [] };
+    return { name: "", preferences: [], facts: [] };
   }
 }
 
@@ -281,6 +284,42 @@ Return only the summary text.`;
   return session;
 }
 
+/**
+ * Get highly relevant episodic memories based on the attention system (importance, recency, relevance).
+ */
+function getAttentiveMemory(sessionId, currentTaskContext, limit = 3) {
+  const session = getSession(sessionId);
+  if (!session || !session.episodicMemory) return [];
+
+  const now = Date.now();
+  const scoredMemories = session.episodicMemory.map(mem => {
+    // 1. Recency Score (decays over hours)
+    const age = now - (mem.timestamp || now);
+    const recencyScore = Math.max(0, 100 - (age / (1000 * 60 * 60)));
+
+    // 2. Importance Score (default 50 if not specified)
+    const importanceScore = mem.importance || 50;
+
+    // 3. Relevance Score (keyword overlap heuristic)
+    let relevanceScore = 0;
+    if (currentTaskContext && mem.summary) {
+      const keywords = currentTaskContext.toLowerCase().split(/\s+/);
+      const summaryLower = mem.summary.toLowerCase();
+      for (const kw of keywords) {
+        if (kw.length > 3 && summaryLower.includes(kw)) relevanceScore += 10;
+      }
+    }
+    relevanceScore = Math.min(100, relevanceScore);
+
+    const totalScore = (importanceScore * 1.5) + (recencyScore * 0.5) + (relevanceScore * 2.0);
+
+    return { ...mem, scores: { importanceScore, recencyScore, relevanceScore, totalScore } };
+  });
+
+  scoredMemories.sort((a, b) => b.scores.totalScore - a.scores.totalScore);
+  return scoredMemories.slice(0, limit);
+}
+
 module.exports = {
   getSession,
   saveSession,
@@ -290,4 +329,5 @@ module.exports = {
   getLongTermMemory,
   updateLongTermMemory,
   compressSession,
+  getAttentiveMemory
 };

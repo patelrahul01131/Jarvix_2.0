@@ -1,96 +1,218 @@
-import { useMemo } from 'react';
+import { useMemo } from "react";
 
 export default function MemoryDashboard({ session, messages }) {
-  const memory = session?.memory;
+  const taskMemory = session?.taskMemory || {};
+  const workingMemory = session?.workingMemory || {};
+  const failureMemory = session?.failureMemory || [];
 
-  // Short-term: last 3 user messages
-  const shortTermMsgs = useMemo(() => {
-    return messages
-      .filter(m => m.role === 'user')
-      .slice(-3)
-      .map(m => {
-        const c = m.content;
-        // Strip injected context prefix
-        const reqMatch = c.match(/USER REQUEST:\s*(.+?)(?:\n|$)/i);
-        const text = reqMatch ? reqMatch[1].trim() : c.slice(0, 60);
-        return text.length > 60 ? text.slice(0, 60) + '…' : text;
-      })
-      .reverse();
+  // Derive current goal
+  const currentGoal = useMemo(() => {
+    return taskMemory.goal || "No goal established";
+  }, [taskMemory.goal]);
+
+  // Derive last observation
+  const lastObservation = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "system")
+        return (
+          messages[i].content.slice(0, 80) +
+          (messages[i].content.length > 80 ? "..." : "")
+        );
+    }
+    return "No recent observations";
   }, [messages]);
 
-  // Working memory
-  const modifiedFiles = memory?.modifiedFiles || [];
-  const summarySent = memory?.summary || '';
-
-  // Long-term: derive from session
+  const activeFiles = Array.isArray(workingMemory.activeFiles)
+    ? workingMemory.activeFiles
+    : [];
   const sessionAge = session?.createdAt
     ? Math.floor((Date.now() - session.createdAt) / 60000)
     : 0;
 
-  const totalMessages = messages.length;
-  const assistantMessages = messages.filter(m => m.role === 'assistant').length;
-  const filesCount = modifiedFiles.length;
+  const failureCount = failureMemory.length;
 
   return (
-    <div className="memory-dashboard">
-
+    <div
+      className="memory-dashboard"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "16px",
+        padding: "12px",
+      }}
+    >
       {/* Short-Term Memory */}
-      <div className="memory-tier short-term">
-        <div className="memory-tier-header">
-          <span className="memory-tier-dot" />
-          <span className="memory-tier-name">Short-Term Memory</span>
+      <div
+        className="memory-tier short-term"
+        style={{
+          background: "var(--bg-elevated)",
+          borderRadius: "6px",
+          padding: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontWeight: "bold",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            marginBottom: "12px",
+            borderBottom: "1px solid rgba(255,255,255,0.05)",
+            paddingBottom: "6px",
+          }}
+        >
+          <span className="memory-tier-dot" style={{ background: "#60a5fa" }} />
+          <span>Short-Term Memory</span>
         </div>
-        <div className="memory-tier-body">
-          {shortTermMsgs.length === 0 ? (
-            <div className="memory-empty">No recent messages</div>
-          ) : (
-            shortTermMsgs.map((msg, i) => (
-              <div key={i} className="memory-field">
-                <div className="memory-field-label">Message {shortTermMsgs.length - i}</div>
-                <div className="memory-field-value" style={{ fontSize: '11px', color: 'var(--fg-muted)' }}>
-                  {msg}
-                </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div>
+            <div
+              style={{
+                fontSize: "10px",
+                color: "var(--fg-muted)",
+                textTransform: "uppercase",
+                marginBottom: "2px",
+              }}
+            >
+              Last Observation
+            </div>
+            <div style={{ fontSize: "11px", fontFamily: "var(--font-mono)" }}>
+              {lastObservation}
+            </div>
+          </div>
+          {failureCount > 0 && (
+            <div>
+              <div
+                style={{
+                  fontSize: "10px",
+                  color: "var(--fg-muted)",
+                  textTransform: "uppercase",
+                  marginBottom: "2px",
+                }}
+              >
+                Failure Count
               </div>
-            ))
+              <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                {failureCount} retries recorded
+              </div>
+            </div>
           )}
         </div>
       </div>
 
       {/* Working Memory */}
-      <div className="memory-tier working">
-        <div className="memory-tier-header">
-          <span className="memory-tier-dot" />
-          <span className="memory-tier-name">Working Memory</span>
+      <div
+        className="memory-tier working"
+        style={{
+          background: "var(--bg-elevated)",
+          borderRadius: "6px",
+          padding: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontWeight: "bold",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            marginBottom: "12px",
+            borderBottom: "1px solid rgba(255,255,255,0.05)",
+            paddingBottom: "6px",
+          }}
+        >
+          <span className="memory-tier-dot" style={{ background: "#a855f7" }} />
+          <span>Working Memory</span>
         </div>
-        <div className="memory-tier-body">
-          <div className="memory-field">
-            <div className="memory-field-label">Session ID</div>
-            <div className="memory-field-value" style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--fg-muted)' }}>
-              {session?.id?.slice(0, 20) || '—'}…
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div>
+            <div
+              style={{
+                fontSize: "10px",
+                color: "var(--fg-muted)",
+                textTransform: "uppercase",
+                marginBottom: "2px",
+              }}
+            >
+              Active Files
             </div>
-          </div>
-          <div className="memory-field">
-            <div className="memory-field-label">Active Files</div>
-            {modifiedFiles.length === 0 ? (
-              <div className="memory-field-value" style={{ color: 'var(--fg-muted)' }}>None yet</div>
+            {activeFiles.length === 0 ? (
+              <div style={{ fontSize: "12px", color: "var(--fg-muted)" }}>
+                None yet
+              </div>
             ) : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', marginTop: '2px' }}>
-                {modifiedFiles.slice(-6).map((f, i) => (
-                  <span key={i} className="memory-tag">
-                    📄 {f.split('/').pop() || f.split('\\').pop()}
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "4px",
+                  marginTop: "2px",
+                }}
+              >
+                {activeFiles.slice(0, 4).map((f, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      background: "rgba(255,255,255,0.05)",
+                      padding: "2px 6px",
+                      borderRadius: "4px",
+                      fontSize: "10px",
+                    }}
+                  >
+                    📄{" "}
+                    {typeof f === "string"
+                      ? f.split(/[/\\]/).pop()
+                      : JSON.stringify(f)}
                   </span>
                 ))}
-                {modifiedFiles.length > 6 && (
-                  <span className="memory-tag">+{modifiedFiles.length - 6} more</span>
+                {activeFiles.length > 4 && (
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      color: "var(--fg-muted)",
+                      alignSelf: "center",
+                    }}
+                  >
+                    +{activeFiles.length - 4} more
+                  </span>
                 )}
               </div>
             )}
           </div>
-          {summarySent && (
-            <div className="memory-field">
-              <div className="memory-field-label">Context Summary</div>
-              <div className="memory-field-value" style={{ fontSize: '10px', color: 'var(--fg-muted)' }}>
-                {summarySent.slice(0, 120)}{summarySent.length > 120 ? '…' : ''}
+          {taskMemory.completed && taskMemory.completed.length > 0 && (
+            <div>
+              <div
+                style={{
+                  fontSize: "10px",
+                  color: "var(--fg-muted)",
+                  textTransform: "uppercase",
+                  marginBottom: "2px",
+                }}
+              >
+                Completed Tasks
+              </div>
+              <div style={{ fontSize: "11px", color: "var(--success)" }}>
+                {taskMemory.completed.slice(-2).map((t, i) => (
+                  <div key={i}>✓ {t}</div>
+                ))}
+              </div>
+            </div>
+          )}
+          {taskMemory.pending && taskMemory.pending.length > 0 && (
+            <div>
+              <div
+                style={{
+                  fontSize: "10px",
+                  color: "var(--fg-muted)",
+                  textTransform: "uppercase",
+                  marginBottom: "2px",
+                }}
+              >
+                Pending Tasks
+              </div>
+              <div style={{ fontSize: "11px", color: "var(--fg-muted)" }}>
+                {taskMemory.pending.slice(0, 2).map((t, i) => (
+                  <div key={i}>□ {t}</div>
+                ))}
               </div>
             </div>
           )}
@@ -98,36 +220,168 @@ export default function MemoryDashboard({ session, messages }) {
       </div>
 
       {/* Long-Term Memory */}
-      <div className="memory-tier long-term">
-        <div className="memory-tier-header">
-          <span className="memory-tier-dot" />
-          <span className="memory-tier-name">Long-Term Memory</span>
+      <div
+        className="memory-tier long-term"
+        style={{
+          background: "var(--bg-elevated)",
+          borderRadius: "6px",
+          padding: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontWeight: "bold",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            marginBottom: "12px",
+            borderBottom: "1px solid rgba(255,255,255,0.05)",
+            paddingBottom: "6px",
+          }}
+        >
+          <span className="memory-tier-dot" style={{ background: "#22c55e" }} />
+          <span>Project Knowledge</span>
         </div>
-        <div className="memory-tier-body">
-          <div className="memory-field">
-            <div className="memory-field-label">Session Age</div>
-            <div className="memory-field-value">
-              {sessionAge < 60
-                ? `${sessionAge} min`
-                : `${Math.floor(sessionAge / 60)}h ${sessionAge % 60}m`}
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div>
+            <div
+              style={{
+                fontSize: "10px",
+                color: "var(--fg-muted)",
+                textTransform: "uppercase",
+                marginBottom: "2px",
+              }}
+            >
+              Project Architecture
+            </div>
+            <div
+              style={{
+                fontSize: "12px",
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "4px",
+              }}
+            >
+              {session?.projectKnowledge ? (
+                <>
+                  <span
+                    style={{
+                      background: "rgba(255,255,255,0.05)",
+                      padding: "2px 6px",
+                      borderRadius: "4px",
+                    }}
+                  >
+                    {session.projectKnowledge.language}
+                  </span>
+                  {session.projectKnowledge.framework !== "Unknown" && (
+                    <span
+                      style={{
+                        background: "rgba(255,255,255,0.05)",
+                        padding: "2px 6px",
+                        borderRadius: "4px",
+                      }}
+                    >
+                      {session.projectKnowledge.framework}
+                    </span>
+                  )}
+                  {session.projectKnowledge.database !== "Unknown" && (
+                    <span
+                      style={{
+                        background: "rgba(255,255,255,0.05)",
+                        padding: "2px 6px",
+                        borderRadius: "4px",
+                      }}
+                    >
+                      {session.projectKnowledge.database}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span>workspace/ (Discovered)</span>
+              )}
             </div>
           </div>
-          <div className="memory-field">
-            <div className="memory-field-label">Exchange Count</div>
-            <div className="memory-field-value">{assistantMessages} responses ({totalMessages} total)</div>
+          <div>
+            <div
+              style={{
+                fontSize: "10px",
+                color: "var(--fg-muted)",
+                textTransform: "uppercase",
+                marginBottom: "2px",
+              }}
+            >
+              User Profile
+            </div>
+            <div style={{ fontSize: "12px" }}>
+              {session?.userProfile?.name && (
+                <div style={{ marginBottom: "4px" }}>
+                  <strong>Name:</strong> {session.userProfile.name}
+                </div>
+              )}
+              {session?.userProfile?.preferences &&
+                session.userProfile.preferences.length > 0 && (
+                  <div>
+                    <strong>Preferences:</strong>
+                    <ul
+                      style={{
+                        margin: "4px 0 0 0",
+                        paddingLeft: "16px",
+                        color: "var(--fg-muted)",
+                      }}
+                    >
+                      {session.userProfile.preferences.map((p, i) => (
+                        <li key={i}>{p}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              {session?.userProfile?.facts &&
+                session.userProfile.facts.length > 0 && (
+                  <div style={{ marginTop: "4px" }}>
+                    <strong>Facts:</strong>
+                    <ul
+                      style={{
+                        margin: "4px 0 0 0",
+                        paddingLeft: "16px",
+                        color: "var(--fg-muted)",
+                      }}
+                    >
+                      {session.userProfile.facts.map((f, i) => (
+                        <li key={i}>{f}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              {!session?.userProfile?.name &&
+                (!session?.userProfile?.preferences ||
+                  session.userProfile.preferences.length === 0) &&
+                (!session?.userProfile?.facts ||
+                  session.userProfile.facts.length === 0) && (
+                  <span style={{ color: "var(--fg-muted)" }}>
+                    No personal facts extracted yet.
+                  </span>
+                )}
+            </div>
           </div>
-          <div className="memory-field">
-            <div className="memory-field-label">Files Modified</div>
-            <div className="memory-field-value">
-              {filesCount === 0
-                ? <span style={{ color: 'var(--fg-muted)' }}>None</span>
-                : <span style={{ color: 'var(--success)', fontWeight: 600 }}>{filesCount} file{filesCount !== 1 ? 's' : ''}</span>
-              }
+          <div>
+            <div
+              style={{
+                fontSize: "10px",
+                color: "var(--fg-muted)",
+                textTransform: "uppercase",
+                marginBottom: "2px",
+              }}
+            >
+              Session Lifetime
+            </div>
+            <div style={{ fontSize: "12px" }}>
+              {sessionAge < 60
+                ? `${sessionAge} minutes active`
+                : `${Math.floor(sessionAge / 60)}h ${sessionAge % 60}m active`}
             </div>
           </div>
         </div>
       </div>
-
     </div>
   );
 }

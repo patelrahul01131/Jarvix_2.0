@@ -7,9 +7,12 @@ CRITICAL RULES:
 2. When modifying an existing file, use "fs.editFile". Provide the exact line ranges and replacement text.
 3. If the user is just asking a question, YOU MUST use the "response" tool. DO NOT write explanations into files unless explicitly asked.
 4. File writes/edits are PROPOSED to the user and require manual approval. Do NOT use shell.exec on files you have just created or modified in the same plan.
-5. terminal commands MUST run correctly on WINDOWS (cmd or PowerShell). USE DOUBLE QUOTES (") for paths with spaces. DO NOT use single quotes (').
-6. YOUR OUTPUT MUST BE STRICTLY VALID JSON. Escape all inner double quotes (\\") inside strings! Escape backslashes in paths (C:\\\\Users\\\\...)!
-7. NEVER use unescaped double quotes inside ANY string values (like "message", "content", or "command"). Use single quotes or properly escape them (e.g. \\"text\\").
+10. terminal commands MUST run correctly on WINDOWS PowerShell. USE DOUBLE QUOTES (") for paths with spaces. DO NOT use single quotes ('). NEVER chain commands with "&&" (PowerShell does not support it). You MUST execute each command as a separate step, or use ";" to separate them.
+11. YOUR OUTPUT MUST BE STRICTLY VALID JSON. Escape all inner double quotes (\\") inside strings! Escape backslashes in paths (C:\\\\Users\\\\...)!
+12. NEVER use unescaped double quotes inside ANY string values (like "message", "content", or "command"). Use single quotes or properly escape them (e.g. \\"text\\").
+13. YOU MUST use explicit task transitions. Example: Locate File -> Read File -> Summarize. ALWAYS update task_update.current_step.
+14. You MUST include "activeFiles" inside "task_update". If you are reading or writing a file, list its name there. Failure to do so breaks the UI.
+15. TOOL_RESULT_PROCESSING: If the history shows a tool execution result, your ONLY job is to interpret that result. DO NOT hallucinate facts or use world knowledge if the tool result is empty or unrelated. Always base your response directly on the tool output!
 
 AVAILABLE TOOLS:
 - "fs.editFile": Replace a specific block of text in an existing file. input: { "path": string, "startLine": number, "endLine": number, "replace": "new string" }
@@ -24,17 +27,31 @@ OUTPUT FORMAT:
 {
   "thought": "Write out your reasoning here. What did the last command output? What should we do next? Explain step by step.",
   "task_update": {
+    "current_step": "Description of the current explicit task step (e.g., Reading test.js)",
     "completed": ["Task 1"],
     "active": ["Task 2"],
     "pending": ["Task 3"],
     "activeFiles": ["file.js"]
   },
-  "action": "Description of what this step does",
-  "tool": "fs.writeFile",
-  "input": {
-    "path": "hello.js",
-    "content": "console.log('Hello, World!');"
-  }
+  "steps": [
+    {
+      "id": 1,
+      "action": "Create hello.js",
+      "tool": "fs.writeFile",
+      "input": {
+        "path": "hello.js",
+        "content": "console.log('Hello, World!');"
+      }
+    },
+    {
+      "id": 2,
+      "action": "Run the script",
+      "tool": "shell.exec",
+      "input": {
+        "command": "node hello.js"
+      }
+    }
+  ]
 }`;
 
 const FIXER_SYSTEM_PROMPT = `You are the Fixer Module of Jarvix Agent OS.
@@ -61,7 +78,7 @@ DO NOT output any text, ONLY valid JSON in this format:
 const INTENT_CLASSIFIER_PROMPT = `You are an Intent Classifier for an AI coding agent.
 Analyze the user's request and return a strict JSON object (NO markdown) matching this schema:
 {
-  "intent": "CODE_MODIFICATION" | "DEBUG" | "CHAT" | "QUESTION" | "SEARCH" | "SYSTEM_TASK",
+  "intent": "FACT_SHORT" | "FILE_READ" | "FILE_EDIT" | "CODE_MODIFICATION" | "DEBUG" | "CHAT" | "QUESTION" | "SEARCH" | "SYSTEM_TASK",
   "execution_mode": "chat" | "qa" | "search" | "edit" | "debug" | "research" | "agent",
   "complexity": number (0-100),
   "requires_context": boolean,
@@ -74,12 +91,15 @@ Analyze the user's request and return a strict JSON object (NO markdown) matchin
 }
 
 Rules:
-- If the user is just saying hello or general chat, execution_mode is "chat", complexity < 20.
-- If the user is asking a coding question, execution_mode is "qa", complexity < 20.
+- If the user explicitly demands a single-word or highly constrained factual answer AND uses constraint words like 'only', 'just', or 'exact' (e.g., "only tell me the year", "give me just the version number"), intent is "FACT_SHORT", execution_mode = "qa".
+- If the user asks a normal fact or general knowledge question without explicit constraints (e.g., "when he died", "who is ratan tata", "what is react"), intent is "QUESTION", execution_mode = "qa", complexity < 20. Do NOT use FACT_SHORT unless they explicitly restrict your output length.
+- If the user is just saying hello or general chat, intent is "CHAT", execution_mode is "chat", complexity < 20.
+- If the user asks for an explanation or theory (e.g., "how does X work"), intent is "QUESTION", execution_mode is "qa", complexity < 20.
 - If the user wants to search for something, execution_mode is "search".
+- If the user explicitly asks to read a file, intent is "FILE_READ", execution_mode is "agent", complexity < 30.
 - If it's a small rename or tweak, execution_mode is "edit", complexity 20-50.
 - If fixing a bug, execution_mode is "debug".
-- If building a feature or complex system, execution_mode is "agent", complexity 50-100, requires_planning=true, requires_context=true.
+- CRITICAL: If the user asks to "make", "build", "create", "write", or "setup" any file, app, component, or system (e.g., "make a weather app", "create index.js"), execution_mode MUST BE "agent", intent is "CODE_MODIFICATION", requires_planning=true, requires_tools=true. NEVER classify these as "chat" or "qa".
 Output ONLY JSON.`;
 
 module.exports = {

@@ -1,20 +1,7 @@
 import { useMemo } from 'react';
 
-function extractActiveFiles(statusHistory) {
-  const files = [];
-  const seen = new Set();
-  for (const s of statusHistory) {
-    const m = s.match(/(?:Reading|Writing|Preparing|create)\s+([^\s.]+\.[a-zA-Z]{1,6})/i);
-    if (m && !seen.has(m[1])) {
-      seen.add(m[1]);
-      files.push(m[1]);
-    }
-  }
-  return files;
-}
-
 function getFileIcon(filename) {
-  const ext = filename.split('.').pop()?.toLowerCase();
+  const ext = filename?.split('.').pop()?.toLowerCase() || '';
   const map = {
     js: '🟨', jsx: '⚛️', ts: '🔷', tsx: '⚛️',
     css: '🎨', json: '📋', md: '📝', html: '🌐',
@@ -23,151 +10,110 @@ function getFileIcon(filename) {
   return map[ext] || '📄';
 }
 
-export default function ContextPanel({ statusHistory, messages, isLoading }) {
-  const activeFiles = useMemo(() => extractActiveFiles(statusHistory), [statusHistory]);
-
-  // Derive current goal from last user message
-  const lastUserMsg = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'user') {
-        const c = messages[i].content;
-        return c.length > 90 ? c.slice(0, 90) + '…' : c;
-      }
-    }
-    return null;
-  }, [messages]);
-
-  // Derive current plan if any message has isPlan
-  const latestPlan = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].isPlan) return messages[i];
-    }
-    return null;
-  }, [messages]);
-
-  // Derive current task from statusHistory
-  const currentTask = useMemo(() => {
-    if (!statusHistory.length) return null;
-    const last = statusHistory[statusHistory.length - 1];
-    return last.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\s]+/u, '').trim();
-  }, [statusHistory]);
-
-  // Completed steps vs total
+export default function ContextPanel({ session, messages, isLoading }) {
+  const taskMemory = session?.taskMemory || {};
+  const workingMemory = session?.workingMemory || {};
+  
+  // Derive current goal from memory
+  const currentGoal = taskMemory.goal || null;
+  
+  const currentStep = taskMemory.current_step || 'Initializing...';
+  const activeFiles = Array.isArray(workingMemory.activeFiles) ? workingMemory.activeFiles : [];
+  
+  // Calculate completed edits from messages
   const completedSteps = useMemo(() => {
-    const fileEdits = messages.reduce((acc, m) => acc + (m.fileEdits?.length || 0), 0);
-    return fileEdits;
+    return messages.reduce((acc, m) => acc + (m.fileEdits?.filter(e => e.status === 'accepted')?.length || 0), 0);
   }, [messages]);
 
   const pendingFileEdits = useMemo(() => {
-    return messages.reduce((acc, m) => {
-      const pending = m.fileEdits?.filter(e => e.status === 'pending').length || 0;
-      return acc + pending;
-    }, 0);
+    return messages.reduce((acc, m) => acc + (m.fileEdits?.filter(e => e.status === 'pending')?.length || 0), 0);
   }, [messages]);
 
+  const loopCount = useMemo(() => {
+    if (!session?.developerTools) return 0;
+    // Count how many plans in a row have been generated without an intermediate user message
+    let count = 0;
+    for (let i = session.developerTools.length - 1; i >= 0; i--) {
+      if (session.developerTools[i].type === 'plan') count++;
+      else break;
+    }
+    return count;
+  }, [session?.developerTools]);
+
   return (
-    <div className="context-panel">
+    <div className="context-panel" style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '12px' }}>
 
       {/* Current Goal */}
-      <div className="context-card">
-        <div className="context-card-header">
-          <span className="context-card-icon">🎯</span>
-          Current Goal
+      <div className="context-card" style={{ border: '1px solid rgba(124, 106, 247, 0.2)', borderRadius: '6px', padding: '10px', background: 'var(--bg-elevated)' }}>
+        <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', fontSize: '12px' }}>
+          <span>🎯</span> Current Goal
         </div>
-        <div className="context-card-body">
-          {lastUserMsg
-            ? <div className="context-goal-text">{lastUserMsg}</div>
-            : <div className="context-empty">No active goal</div>
-          }
+        <div style={{ fontSize: '12px', color: currentGoal ? 'var(--fg)' : 'var(--fg-muted)' }}>
+          {currentGoal || "No active goal"}
         </div>
       </div>
 
       {/* Agent Status */}
-      {isLoading && currentTask && (
-        <div className="context-card">
-          <div className="context-card-header">
-            <span className="context-card-icon">⚡</span>
-            Current Task
+      {isLoading && (
+        <div className="context-card" style={{ border: '1px solid rgba(124, 106, 247, 0.2)', borderRadius: '6px', padding: '10px', background: 'var(--bg-elevated)' }}>
+          <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', fontSize: '12px' }}>
+            <span>⚡</span> Current Step
           </div>
-          <div className="context-card-body">
-            <div className="context-goal-text" style={{ color: 'var(--accent)' }}>
-              {currentTask}
+          <div style={{ fontSize: '12px', color: 'var(--accent)' }}>
+            {currentStep}
+          </div>
+          {loopCount > 2 && (
+            <div style={{ fontSize: '10px', color: 'var(--warning)', marginTop: '4px' }}>
+              Loop Check: {loopCount} consecutive plans
             </div>
-          </div>
+          )}
         </div>
       )}
 
       {/* Active Files */}
       {activeFiles.length > 0 && (
-        <div className="context-card">
-          <div className="context-card-header">
-            <span className="context-card-icon">📂</span>
-            Active Files
+        <div className="context-card" style={{ border: '1px solid rgba(124, 106, 247, 0.2)', borderRadius: '6px', padding: '10px', background: 'var(--bg-elevated)' }}>
+          <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', fontSize: '12px' }}>
+            <span>📂</span> Active Files
           </div>
-          <div className="context-card-body">
-            <div className="context-file-list">
-              {activeFiles.map((f, i) => (
-                <div key={i} className="context-file-item">
-                  <span className="context-file-icon">{getFileIcon(f)}</span>
-                  {f}
-                </div>
-              ))}
-            </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {activeFiles.map((f, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}>
+                <span>{getFileIcon(f)}</span>
+                <span>{typeof f === 'string' ? f.split(/[/\\]/).pop() : JSON.stringify(f)}</span>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
       {/* Progress */}
-      {completedSteps > 0 && (
-        <div className="context-card">
-          <div className="context-card-header">
-            <span className="context-card-icon">📊</span>
-            File Changes
+      {(completedSteps > 0 || pendingFileEdits > 0) && (
+        <div className="context-card" style={{ border: '1px solid rgba(124, 106, 247, 0.2)', borderRadius: '6px', padding: '10px', background: 'var(--bg-elevated)' }}>
+          <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', fontSize: '12px' }}>
+            <span>📊</span> File Changes
           </div>
-          <div className="context-card-body">
-            <div className="progress-text">
-              <span>{completedSteps} file{completedSteps !== 1 ? 's' : ''} modified</span>
-              {pendingFileEdits > 0 && (
-                <span style={{ color: 'var(--warning)' }}>{pendingFileEdits} pending</span>
-              )}
-            </div>
-            <div className="progress-bar-container" style={{ marginTop: '8px' }}>
-              <div
-                className="progress-bar-fill"
-                style={{ width: pendingFileEdits > 0 ? `${(completedSteps / (completedSteps + pendingFileEdits)) * 100}%` : '100%' }}
-              />
-            </div>
+          <div style={{ fontSize: '11px', color: 'var(--fg-muted)', marginBottom: '6px' }}>
+            <span>{completedSteps} file{completedSteps !== 1 ? 's' : ''} modified</span>
+            {pendingFileEdits > 0 && (
+              <span style={{ color: 'var(--warning)', marginLeft: '8px' }}>{pendingFileEdits} pending review</span>
+            )}
           </div>
-        </div>
-      )}
-
-      {/* Plan Summary */}
-      {latestPlan && (
-        <div className="context-card">
-          <div className="context-card-header">
-            <span className="context-card-icon">📋</span>
-            Active Plan
-          </div>
-          <div className="context-card-body">
-            <div style={{
-              fontSize: '10px',
-              color: latestPlan.planStatus === 'approved' ? 'var(--success)' : 'var(--warning)',
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: '0.07em',
-              marginBottom: '4px'
-            }}>
-              {latestPlan.planStatus === 'approved' ? '✅ Approved' : '⏳ Awaiting Approval'}
-            </div>
-            <div className="context-empty" style={{ fontStyle: 'normal', fontSize: '11px' }}>
-              {latestPlan.content.slice(0, 100)}…
-            </div>
+          <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
+            <div
+              style={{ 
+                height: '100%', 
+                background: pendingFileEdits > 0 ? 'var(--warning)' : 'var(--success)',
+                width: pendingFileEdits > 0 ? `${(completedSteps / Math.max(1, completedSteps + pendingFileEdits)) * 100}%` : '100%',
+                transition: 'width 0.3s ease'
+              }}
+            />
           </div>
         </div>
       )}
-
-      {!lastUserMsg && !isLoading && (
-        <div className="context-empty" style={{ textAlign: 'center', padding: '16px 0' }}>
+      
+      {!currentGoal && !isLoading && (
+        <div style={{ textAlign: 'center', padding: '16px 0', fontSize: '12px', color: 'var(--fg-muted)' }}>
           Start a conversation to see context
         </div>
       )}

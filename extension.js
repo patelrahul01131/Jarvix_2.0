@@ -25,15 +25,15 @@ function writeBackupLog(fileSnapshots) {
   try {
     const root = getWorkspaceRoot();
     if (!root || fileSnapshots.length === 0) return;
-    const backupDir = path.join(root, '.jarvix', 'backups');
+    const backupDir = path.join(root, ".jarvix", "backups");
     if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
     const timestamp = Date.now();
     const backupPath = path.join(backupDir, `${timestamp}.json`);
     const payload = { timestamp, files: fileSnapshots };
-    fs.writeFileSync(backupPath, JSON.stringify(payload, null, 2), 'utf8');
+    fs.writeFileSync(backupPath, JSON.stringify(payload, null, 2), "utf8");
     console.log(`[Jarvix] Backup written: ${backupPath}`);
   } catch (e) {
-    console.warn('[Jarvix] Failed to write backup log:', e.message);
+    console.warn("[Jarvix] Failed to write backup log:", e.message);
   }
 }
 
@@ -50,7 +50,10 @@ async function applyAtomicTransaction(edits, panel) {
   const snapshots = [];
   for (const edit of edits) {
     if (!edit.isDelete && !edit.isNew && edit.originalCode != null) {
-      snapshots.push({ path: edit.filePath, originalContent: edit.originalCode });
+      snapshots.push({
+        path: edit.filePath,
+        originalContent: edit.originalCode,
+      });
     }
   }
 
@@ -62,12 +65,17 @@ async function applyAtomicTransaction(edits, panel) {
     for (const edit of edits) {
       if (edit.isDelete) {
         let content = null;
-        const fullPath = path.isAbsolute(edit.filePath) ? edit.filePath : path.join(getWorkspaceRoot() || "", edit.filePath);
+        const fullPath = path.isAbsolute(edit.filePath)
+          ? edit.filePath
+          : path.join(getWorkspaceRoot() || "", edit.filePath);
         if (fs.existsSync(fullPath)) {
           content = fs.readFileSync(fullPath, "utf8");
         }
         const success = deleteFileFromWorkspace(edit.filePath);
-        if (!success) throw new Error(`File not found or could not be deleted: ${edit.filePath}`);
+        if (!success)
+          throw new Error(
+            `File not found or could not be deleted: ${edit.filePath}`,
+          );
         written.push({ ...edit, _wasDeleted: true, originalCode: content });
       } else {
         await writeAndSync(edit.filePath, edit.code, panel);
@@ -76,16 +84,20 @@ async function applyAtomicTransaction(edits, panel) {
     }
     return { success: true };
   } catch (err) {
-    console.error('[Jarvix] Atomic write failed, rolling back:', err.message);
+    console.error("[Jarvix] Atomic write failed, rolling back:", err.message);
     // Rollback: restore all previously written files
     for (const w of written) {
       try {
         if (w._wasDeleted) {
           if (w.originalCode != null) {
             await writeAndSync(w.filePath, w.originalCode, panel);
-            console.log(`[Jarvix] Rolled back (restored deleted file): ${w.filePath}`);
+            console.log(
+              `[Jarvix] Rolled back (restored deleted file): ${w.filePath}`,
+            );
           } else {
-            console.warn(`[Jarvix] Cannot restore deleted file (no content): ${w.filePath}`);
+            console.warn(
+              `[Jarvix] Cannot restore deleted file (no content): ${w.filePath}`,
+            );
           }
         } else if (!w.isNew && w.originalCode != null) {
           // Restore original content
@@ -97,7 +109,10 @@ async function applyAtomicTransaction(edits, panel) {
           console.log(`[Jarvix] Rolled back (deleted new file): ${w.filePath}`);
         }
       } catch (rbErr) {
-        console.warn(`[Jarvix] Rollback failed for ${w.filePath}:`, rbErr.message);
+        console.warn(
+          `[Jarvix] Rollback failed for ${w.filePath}:`,
+          rbErr.message,
+        );
       }
     }
     return { success: false, error: err.message };
@@ -124,12 +139,16 @@ async function writeAndSync(filePath, code, panel) {
   const { getWorkspaceRoot } = require("./src/tools/fileSystem");
   const root = getWorkspaceRoot();
   if (!root) throw new Error("No workspace open");
-  
-  const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(root, filePath);
+
+  const absolutePath = path.isAbsolute(filePath)
+    ? filePath
+    : path.join(root, filePath);
   const uri = vscode.Uri.file(absolutePath);
 
   const openDoc = vscode.workspace.textDocuments.find(
-    (d) => d.fileName.toLowerCase().replace(/\\/g, '/') === absolutePath.toLowerCase().replace(/\\/g, '/')
+    (d) =>
+      d.fileName.toLowerCase().replace(/\\/g, "/") ===
+      absolutePath.toLowerCase().replace(/\\/g, "/"),
   );
 
   if (openDoc) {
@@ -143,7 +162,10 @@ async function writeAndSync(filePath, code, panel) {
     await openDoc.save();
   } else {
     // Write via VS Code's native filesystem API so watchers fire correctly
-    await vscode.workspace.fs.writeFile(uri, new Uint8Array(Buffer.from(code, "utf8")));
+    await vscode.workspace.fs.writeFile(
+      uri,
+      new Uint8Array(Buffer.from(code, "utf8")),
+    );
   }
   return absolutePath;
 }
@@ -209,6 +231,10 @@ function activate(context) {
 
               onStatus: (status) => {
                 panel.webview.postMessage({ type: "status", status });
+              },
+
+              onState: (stateUpdate) => {
+                panel.webview.postMessage({ type: "AGENT_STATE", ...stateUpdate });
               },
 
               onChunk: (partialReply) => {
@@ -438,8 +464,12 @@ function activate(context) {
             const sessions = getAllSessions();
             const session = sessions[msg.sessionId];
             let originalCode = null;
-            if (session?.messages[msg.messageIndex]?.fileEdits?.[msg.fileIndex]) {
-              originalCode = session.messages[msg.messageIndex].fileEdits[msg.fileIndex].originalCode;
+            if (
+              session?.messages[msg.messageIndex]?.fileEdits?.[msg.fileIndex]
+            ) {
+              originalCode =
+                session.messages[msg.messageIndex].fileEdits[msg.fileIndex]
+                  .originalCode;
             }
 
             const atomicEdit = {
@@ -450,16 +480,23 @@ function activate(context) {
               originalCode,
             };
 
-            const { success, error } = await applyAtomicTransaction([atomicEdit], panel);
+            const { success, error } = await applyAtomicTransaction(
+              [atomicEdit],
+              panel,
+            );
 
             if (!success) {
-              throw new Error(error || 'Atomic write failed');
+              throw new Error(error || "Atomic write failed");
             }
 
             if (msg.isDelete) {
-              vscode.window.showInformationMessage(`Jarvix deleted: ${msg.filePath}`);
+              vscode.window.showInformationMessage(
+                `Jarvix deleted: ${msg.filePath}`,
+              );
             } else {
-              vscode.window.showInformationMessage(`Jarvix wrote: ${msg.filePath}`);
+              vscode.window.showInformationMessage(
+                `Jarvix wrote: ${msg.filePath}`,
+              );
             }
 
             if (session && session.messages[msg.messageIndex]) {
@@ -468,7 +505,7 @@ function activate(context) {
                 fileEdits[msg.fileIndex].status = "accepted";
                 session.messages.push({
                   role: "system",
-                  content: `[TOOL VERIFICATION] User ACCEPTED file action: ${msg.isDelete ? 'delete' : msg.isNew ? 'create' : 'edit'} on ${msg.filePath}`
+                  content: `[TOOL VERIFICATION] User ACCEPTED file action: ${msg.isDelete ? "delete" : msg.isNew ? "create" : "edit"} on ${msg.filePath}`,
                 });
                 saveSession(msg.sessionId, session);
               }
@@ -492,7 +529,7 @@ function activate(context) {
               fileEdits[msg.fileIndex].status = "declined";
               session.messages.push({
                 role: "system",
-                content: `[TOOL VERIFICATION] User DECLINED file action on ${fileEdits[msg.fileIndex].filePath}. The file was not modified.`
+                content: `[TOOL VERIFICATION] User DECLINED file action on ${fileEdits[msg.fileIndex].filePath}. The file was not modified.`,
               });
               saveSession(msg.sessionId, session);
             }
@@ -509,25 +546,200 @@ function activate(context) {
             const sessions = getAllSessions();
             const session = sessions[msg.sessionId];
             if (session && session.messages[msg.messageIndex]) {
-              const commands = session.messages[msg.messageIndex].suggestedCommands;
+              const commands =
+                session.messages[msg.messageIndex].suggestedCommands;
               if (commands && commands[msg.commandIndex]) {
                 commands[msg.commandIndex].status = "accepted";
                 session.messages.push({
                   role: "system",
-                  content: `[TOOL VERIFICATION] User EXECUTED terminal command: ${msg.command}`
+                  content: `[TOOL VERIFICATION] User EXECUTED terminal command: ${msg.command}`,
                 });
                 saveSession(msg.sessionId, session);
               }
             }
 
-            let terminal = vscode.window.terminals.find(
-              (t) => t.name === "Jarvix Terminal",
+            const { spawn } = require("child_process");
+            const cwd = getWorkspaceRoot();
+
+            vscode.window.showInformationMessage(
+              `Jarvix executing: ${msg.command}`,
             );
-            if (!terminal) {
-              terminal = vscode.window.createTerminal("Jarvix Terminal");
+            panel.webview.postMessage({
+              type: "status",
+              status: `[${new Date().toLocaleTimeString()}] ⚙️ Executing command: ${msg.command}...`,
+            });
+
+            const proc = spawn(msg.command, { shell: true, cwd });
+
+            const currentSession = getAllSessions()[msg.sessionId];
+
+            if (currentSession) {
+              if (!currentSession.executionLogs)
+                currentSession.executionLogs = [];
+              const logEntry = {
+                stepId: msg.messageIndex,
+                command: msg.command,
+                status: "running",
+                stdout: [],
+                stderr: [],
+                exitCode: null,
+                durationMs: 0,
+              };
+              currentSession.executionLogs.push(logEntry);
+              saveSession(msg.sessionId, currentSession);
             }
-            terminal.show(true);
-            terminal.sendText(msg.command);
+
+            const startTime = Date.now();
+
+            const sendStreamToUI = (streamType, chunk) => {
+              panel.webview.postMessage({
+                type: "streamLog",
+                sessionId: msg.sessionId,
+                command: msg.command,
+                stream: streamType,
+                data: chunk,
+              });
+
+              if (currentSession) {
+                const logEntry = currentSession.executionLogs.find(
+                  (l) => l.command === msg.command && l.status === "running",
+                );
+                if (logEntry) {
+                  logEntry[streamType].push(...chunk.split("\n"));
+                  if (logEntry[streamType].length > 100) {
+                    logEntry[streamType] = logEntry[streamType].slice(-100);
+                  }
+                }
+              }
+            };
+
+            proc.stdout.on("data", (d) =>
+              sendStreamToUI("stdout", d.toString()),
+            );
+            proc.stderr.on("data", (d) =>
+              sendStreamToUI("stderr", d.toString()),
+            );
+
+            const isLongRunning =
+              /^(npm start|npm run dev|node server\.js|nodemon|vite)/.test(
+                msg.command,
+              );
+
+            if (isLongRunning) {
+              // For long running, notify the agent after a startup delay
+              setTimeout(async () => {
+                if (currentSession) {
+                  const logEntry = currentSession.executionLogs.find(
+                    (l) => l.command === msg.command && l.status === "running",
+                  );
+                  const startupLogs = logEntry
+                    ? logEntry.stdout.join("\n")
+                    : "";
+                  currentSession.messages.push({
+                    role: "system",
+                    content: `[TOOL_RESULT] Background process started (PID: ${proc.pid})\nCommand: ${msg.command}\nInitial Logs:\n${startupLogs}`,
+                  });
+                  saveSession(msg.sessionId, currentSession);
+
+                  activeAbortController = new AbortController();
+                  await askAgent({
+                    workspaceRoot: cwd,
+                    workspaceFiles: listWorkspaceFiles(),
+                    question: "Background process started. Proceed.",
+                    executePlan: true,
+                    sessionId: msg.sessionId,
+                    model: msg.model,
+                    provider: msg.provider,
+                    signal: activeAbortController.signal,
+                    onStatus: (status) =>
+                      panel.webview.postMessage({ type: "status", status }),
+                    onChunk: (partialReply) =>
+                      panel.webview.postMessage({
+                        type: "partialReply",
+                        sessionId: msg.sessionId,
+                        content: partialReply,
+                      }),
+                    onFileWrite: async ({ filePath, code, isNew }) => {
+                      try {
+                        await writeAndSync(filePath, code, panel);
+                        panel.webview.postMessage({
+                          type: "fileAutoWritten",
+                          filePath,
+                          isNew,
+                        });
+                      } catch (e) {}
+                    },
+                  });
+                }
+              }, 3000);
+            } else {
+              proc.on("close", async (code) => {
+                const durationMs = Date.now() - startTime;
+                if (currentSession) {
+                  const logEntry = currentSession.executionLogs.find(
+                    (l) => l.command === msg.command && l.status === "running",
+                  );
+                  if (logEntry) {
+                    logEntry.status = code === 0 ? "success" : "failed";
+                    logEntry.exitCode = code;
+                    logEntry.durationMs = durationMs;
+                  }
+
+                  const stdoutStr = logEntry ? logEntry.stdout.join("\n") : "";
+                  const stderrStr = logEntry ? logEntry.stderr.join("\n") : "";
+                  const resultStr =
+                    code !== 0
+                      ? `Error (Exit Code ${code})\nStderr: ${stderrStr}\nStdout: ${stdoutStr}`
+                      : `Stdout:\n${stdoutStr}\nStderr:\n${stderrStr}`;
+
+                  currentSession.messages.push({
+                    role: "system",
+                    content: `[TOOL_RESULT] Command execution finished.\nResult:\n${resultStr}`,
+                  });
+                  saveSession(msg.sessionId, currentSession);
+
+                  activeAbortController = new AbortController();
+                  await askAgent({
+                    workspaceRoot: cwd,
+                    workspaceFiles: listWorkspaceFiles(),
+                    question: "Command execution finished. Proceed.",
+                    executePlan: true,
+                    sessionId: msg.sessionId,
+                    model: msg.model,
+                    provider: msg.provider,
+                    signal: activeAbortController.signal,
+                    onStatus: (status) =>
+                      panel.webview.postMessage({ type: "status", status }),
+                    onChunk: (partialReply) =>
+                      panel.webview.postMessage({
+                        type: "partialReply",
+                        sessionId: msg.sessionId,
+                        content: partialReply,
+                      }),
+                    onFileWrite: async ({ filePath, code, isNew }) => {
+                      try {
+                        await writeAndSync(filePath, code, panel);
+                        panel.webview.postMessage({
+                          type: "fileAutoWritten",
+                          filePath,
+                          isNew,
+                        });
+                      } catch (e) {}
+                    },
+                  });
+                  activeAbortController = null;
+                  panel.webview.postMessage({
+                    type: "sessionsLoaded",
+                    sessions: getAllSessions(),
+                  });
+                  panel.webview.postMessage({
+                    type: "reply",
+                    sessionId: msg.sessionId,
+                    session: getAllSessions()[msg.sessionId],
+                  });
+                }
+              });
+            }
 
             panel.webview.postMessage({
               type: "sessionsLoaded",
@@ -543,12 +755,13 @@ function activate(context) {
           const sessions = getAllSessions();
           const session = sessions[msg.sessionId];
           if (session && session.messages[msg.messageIndex]) {
-            const commands = session.messages[msg.messageIndex].suggestedCommands;
+            const commands =
+              session.messages[msg.messageIndex].suggestedCommands;
             if (commands && commands[msg.commandIndex]) {
               commands[msg.commandIndex].status = "declined";
               session.messages.push({
                 role: "system",
-                content: `[TOOL VERIFICATION] User DECLINED terminal command: ${commands[msg.commandIndex].command}`
+                content: `[TOOL VERIFICATION] User DECLINED terminal command: ${commands[msg.commandIndex].command}`,
               });
               saveSession(msg.sessionId, session);
             }
@@ -570,29 +783,39 @@ function activate(context) {
             const fs = require("fs");
             const os = require("os");
             const path = require("path");
-            
+
             const originalPath = path.resolve(getWorkspaceRoot(), msg.filePath);
             const isNew = msg.isNew;
             const originalCode = msg.originalCode || "";
             const proposedCode = msg.proposedCode || "";
-            
+
             // Create temp files for comparison
-            const tempOriginal = path.join(os.tmpdir(), "jarvix_orig_" + path.basename(msg.filePath));
-            const tempProposed = path.join(os.tmpdir(), "jarvix_prop_" + path.basename(msg.filePath));
-            
+            const tempOriginal = path.join(
+              os.tmpdir(),
+              "jarvix_orig_" + path.basename(msg.filePath),
+            );
+            const tempProposed = path.join(
+              os.tmpdir(),
+              "jarvix_prop_" + path.basename(msg.filePath),
+            );
+
             fs.writeFileSync(tempOriginal, originalCode, "utf8");
             fs.writeFileSync(tempProposed, proposedCode, "utf8");
-            
-            const title = isNew ? `Proposed New File: ${msg.filePath}` : `Proposed Edit: ${msg.filePath}`;
-            
+
+            const title = isNew
+              ? `Proposed New File: ${msg.filePath}`
+              : `Proposed Edit: ${msg.filePath}`;
+
             vscode.commands.executeCommand(
               "vscode.diff",
               vscode.Uri.file(tempOriginal),
               vscode.Uri.file(tempProposed),
-              title
+              title,
             );
           } catch (err) {
-            vscode.window.showErrorMessage("Failed to open diff: " + err.message);
+            vscode.window.showErrorMessage(
+              "Failed to open diff: " + err.message,
+            );
           }
           break;
         }
@@ -608,13 +831,15 @@ function activate(context) {
       if (!filePath.startsWith(root)) return;
       const content = document.getText();
       const relativePath = path.relative(root, filePath).replace(/\\/g, "/");
-      
+
       // Prevent RAG drift by indexing the file on save
       try {
         const indexer = require("./src/indexer/RepositoryIndexer");
-        indexer.indexFile(filePath).catch(e => console.warn("Indexer error:", e.message));
+        indexer
+          .indexFile(filePath)
+          .catch((e) => console.warn("Indexer error:", e.message));
       } catch (e) {}
-      
+
       panel.webview.postMessage({
         type: "fileChanged",
         filePath: relativePath,

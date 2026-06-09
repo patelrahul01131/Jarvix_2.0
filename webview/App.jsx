@@ -22,6 +22,7 @@ export default function App() {
   const [planModeEnabled, setPlanModeEnabled] = useState(true);
   const [rightPanelOpen, setRightPanelOpen]   = useState(true);
   const [workspaceFiles, setWorkspaceFiles]   = useState([]);
+  const [liveAgentState, setLiveAgentState]   = useState(null);
 
   // Streaming state — isolated so only the streaming bubble re-renders per token
   const [streamingMessage, setStreamingMessage] = useState(null); // { content, sessionId }
@@ -106,6 +107,18 @@ export default function App() {
           return [...prev, s];
         });
       }
+    }
+
+    if (msg.type === 'AGENT_STATE') {
+      setLiveAgentState({
+        phase: msg.phase,
+        currentStep: msg.currentStep,
+        activeTool: msg.activeTool,
+        executionStatus: msg.executionStatus,
+        totalSteps: msg.totalSteps,
+        budget: msg.budget,
+        lastResult: msg.lastResult
+      });
     }
 
     if (msg.type === 'fileAutoWritten') {
@@ -495,10 +508,17 @@ export default function App() {
             <label htmlFor="planModeToggle">📋 Plan mode</label>
           </div>
 
+          {activeSession?.agentStatus && (
+            <div style={{ marginLeft: 'auto', marginRight: '16px', padding: '4px 12px', background: 'var(--bg-elevated)', borderRadius: '20px', fontSize: '12px', fontWeight: 'bold', border: '1px solid rgba(255,255,255,0.1)' }}>
+              {activeSession.agentStatus}
+            </div>
+          )}
+
           <button
             className={`right-panel-toggle-btn ${rightPanelOpen ? 'active' : ''}`}
             onClick={() => setRightPanelOpen(o => !o)}
             title={rightPanelOpen ? 'Hide context panel' : 'Show context panel'}
+            style={{ marginLeft: activeSession?.agentStatus ? '0' : 'auto' }}
           >
             {rightPanelOpen ? '◧ Hide Panel' : '◨ Context'}
           </button>
@@ -539,6 +559,7 @@ export default function App() {
           messages={messages}
           session={activeSession}
           workspaceFiles={workspaceFiles}
+          liveAgentState={liveAgentState}
         />
       )}
     </div>

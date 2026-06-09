@@ -3,15 +3,48 @@
  * Selects and runs tools based on the current plan step.
  */
 
+const { TOOL_REGISTRY } = require("./toolRegistry");
+
 async function runExecutor(step, context, args) {
   const { onChunk, onStatus } = args;
 
-  if (onStatus) onStatus(`⚙️ Executing Step: ${step.action}`);
+  const toolName = step.tool;
+  const toolDefinition = TOOL_REGISTRY[toolName];
+
+  // --- TOOL NORMALIZATION GUARD (SINGLE SOURCE OF TRUTH) ---
+  if (!toolDefinition) {
+    return {
+      success: false,
+      stdout: "",
+      stderr: `TOOL_HALLUCINATION_ERROR: The requested tool '${toolName}' is not registered in TOOL_REGISTRY. You must only use listed tools.`,
+      status: "REPLAN_NEEDED"
+    };
+  }
+
+  // --- SCHEMA VALIDATOR ENGINE ---
+  const input = step.input || {};
+  if (toolDefinition.schema) {
+    for (const key of Object.keys(toolDefinition.schema)) {
+      if (toolDefinition.schema[key] === "string" && typeof input[key] !== "string") {
+        return { success: false, stderr: `SCHEMA_ERROR: Tool '${toolName}' requires '${key}' to be a string.`, status: "REPLAN_NEEDED" };
+      }
+      if (toolDefinition.schema[key] === "array" && !Array.isArray(input[key])) {
+        return { success: false, stderr: `SCHEMA_ERROR: Tool '${toolName}' requires '${key}' to be an array.`, status: "REPLAN_NEEDED" };
+      }
+    }
+  }
+
+  // --- POLICY ENGINE ---
+  if (toolDefinition.risk === "high") {
+    if (onStatus) onStatus(`⚠️ High-Risk Action Detected: ${toolName}. Proceeding with caution.`);
+  }
+
+  if (onStatus) onStatus(`⚙️ Executing Step: ${toolName}`);
 
   let executionOutput = "";
 
   try {
-    if (step.tool === "fs.writeFile") {
+    if (toolName === "fs.writeFile") {
       // Use the provided Workspace API instead of blind fs writes
       if (!step.input || typeof step.input.path !== "string") {
         throw new Error(
@@ -62,7 +95,7 @@ async function runExecutor(step, context, args) {
           "Tool Execution Failed: No workspace file writer access.",
         );
       }
-    } else if (step.tool === "fs.editFile") {
+    } else if (toolName === "fs.editFile") {
       if (
         !step.input ||
         typeof step.input.path !== "string" ||
@@ -131,7 +164,7 @@ async function runExecutor(step, context, args) {
           "Tool Execution Failed: No workspace file writer access.",
         );
       }
-    } else if (step.tool === "fs.readFile") {
+    } else if (toolName === "fs.readFile") {
       const fs = require("fs");
       const path = require("path");
 
@@ -158,32 +191,56 @@ async function runExecutor(step, context, args) {
 
       const content = fs.readFileSync(fullPath, "utf-8");
       executionOutput += `\nRead file: ${step.input.path}\nContent:\n${content.substring(0, 1000)}${content.length > 1000 ? "\n... (truncated)" : ""}`;
-    } else if (step.tool === "shell.exec") {
-      if (!args.workspaceRoot) {
-        throw new Error("Tool Execution Failed: No workspace root access.");
+    } else if (toolName === "terminal.exec") {
+      if (!args.workspaceRoot) throw new Error("Tool Execution Failed: No workspace root access.");
+
+      const cmd = step.input.cmd;
+      const cmdArgs = step.input.args;
+
+      if (!toolDefinition.allowedCommands.includes(cmd)) {
+        throw new Error(`SECURITY_VIOLATION: Command '${cmd}' is not in the allowedCommands list for terminal.exec.`);
       }
 
       if (args.proposeTerminalCommand) {
-        args.proposeTerminalCommand({ command: step.input.command });
-        executionOutput += `\nProposed terminal command: ${step.input.command}`;
+        args.proposeTerminalCommand({ command: `${cmd} ${cmdArgs.join(" ")}` });
+        executionOutput += `\nProposed terminal command: ${cmd} ${cmdArgs.join(" ")}`;
       } else {
-        const { exec } = require("child_process");
-        const util = require("util");
-        const execAsync = util.promisify(exec);
-        try {
-          const { stdout, stderr } = await execAsync(step.input.command, {
+        const { spawn } = require("child_process");
+        const isWin = process.platform === "win32";
+        
+        let actualCmd = cmd;
+        if (isWin && cmd === "npm") actualCmd = "npm.cmd";
+        if (isWin && cmd === "npx") actualCmd = "npx.cmd";
+
+        executionOutput += `\nExecuting tokenized command: ${cmd} ${JSON.stringify(cmdArgs)}`;
+        
+        await new Promise((resolve, reject) => {
+          const child = spawn(actualCmd, cmdArgs, {
             cwd: args.workspaceRoot,
-            encoding: "utf-8",
-            maxBuffer: 1024 * 1024 * 10,
+            shell: false, // EXPLICITLY DISABLED FOR SECURITY
           });
-          executionOutput += `\nCommand executed: ${step.input.command}\nOutput: ${stdout}\n${stderr}`;
-        } catch (cmdErr) {
-          throw new Error(
-            `Command failed: ${cmdErr.message}\nStderr: ${cmdErr.stderr || ""}\nStdout: ${cmdErr.stdout || ""}`,
-          );
-        }
+
+          let stdout = "";
+          let stderr = "";
+
+          child.stdout.on("data", (data) => stdout += data.toString());
+          child.stderr.on("data", (data) => stderr += data.toString());
+
+          child.on("close", (code) => {
+            executionOutput += `\nOutput: ${stdout}\n${stderr}`;
+            if (code !== 0) {
+               reject(new Error(`Command exited with code ${code}.\nStderr: ${stderr}\nStdout: ${stdout}`));
+            } else {
+               resolve();
+            }
+          });
+          
+          child.on("error", (err) => {
+            reject(new Error(`Spawn failed: ${err.message}`));
+          });
+        });
       }
-    } else if (step.tool === "list_dir") {
+    } else if (toolName === "list_dir") {
       const fs = require("fs");
       const path = require("path");
       if (!args.workspaceRoot)
@@ -197,7 +254,7 @@ async function runExecutor(step, context, args) {
 
       const items = fs.readdirSync(fullPath);
       executionOutput += `\nContents of ${step.input.path || "."}:\n${items.join("\n")}`;
-    } else if (step.tool === "grep_search") {
+    } else if (toolName === "grep_search") {
       const { exec } = require("child_process");
       const util = require("util");
       const execAsync = util.promisify(exec);
@@ -212,15 +269,13 @@ async function runExecutor(step, context, args) {
           cwd: args.workspaceRoot,
           encoding: "utf-8",
         });
-        executionOutput += `\nSearch Results:\n${stdout}`;
+        executionOutput += `\nSearch results:\n${stdout.substring(0, 1000)}`;
       } catch (e) {
-        executionOutput += `\nSearch Results: No matches found or error (${e.message}).`;
+        throw new Error("Search failed or no matches found.");
       }
-    } else if (step.tool === "response") {
+    } else if (toolName === "response") {
       if (onChunk) onChunk(`\n${step.input.message}\n\n`);
       executionOutput += `\nResponded to user.`;
-    } else {
-      console.warn(`[Executor] Unknown tool: ${step.tool}`);
     }
 
     return {

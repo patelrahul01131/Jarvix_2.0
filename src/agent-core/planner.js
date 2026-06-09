@@ -6,7 +6,6 @@
 const { callLLM } = require("./llmClient");
 const { PLANNER_SYSTEM_PROMPT } = require("../rules/prompts");
 
-
 async function runPlanner(context, args) {
   const {
     question,
@@ -41,39 +40,74 @@ async function runPlanner(context, args) {
 
     let historyContext = "";
     if (context.episodicMemory && context.episodicMemory.length > 0) {
-      historyContext += "\n\nPast Session Summaries:\n" + context.episodicMemory.map(e => e.summary).join("\n");
+      historyContext +=
+        "\n\nPast Session Summaries:\n" +
+        context.episodicMemory.map((e) => e.summary).join("\n");
     }
     if (context.recentMessages && context.recentMessages.length > 0) {
       historyContext +=
-        "\n\nRecent Conversation History:\n" + context.recentMessages.join("\n");
+        "\n\nRecent Conversation History:\n" +
+        context.recentMessages.join("\n");
     }
 
     let memoryContext = "";
+    if (context.userProfile) {
+      memoryContext +=
+        "\n\nUser Profile & Facts (Persisted):\n" +
+        JSON.stringify(context.userProfile, null, 2);
+    }
     if (context.taskMemory) {
-      memoryContext += "\n\nTask Memory:\n" + JSON.stringify(context.taskMemory, null, 2);
+      memoryContext +=
+        "\n\nTask Memory:\n" +
+        JSON.stringify(
+          {
+            current_step: context.taskMemory.current_step || "None",
+            completed: context.taskMemory.completed || [],
+            active: context.taskMemory.active || [],
+            pending: context.taskMemory.pending || [],
+          },
+          null,
+          2,
+        );
     }
     if (context.workingMemory && context.workingMemory.activeFiles) {
       memoryContext += "\n\nWorking Memory (Active Files):\n";
       const fs = require("fs");
       const path = require("path");
-      const activeFilesList = Array.isArray(context.workingMemory.activeFiles) ? context.workingMemory.activeFiles : [];
-      activeFilesList.forEach(relPath => {
-         if (typeof relPath !== "string") return;
-         try {
-           const fullPath = path.resolve(args.workspaceRoot, relPath);
-           if (fs.existsSync(fullPath)) {
-             const code = fs.readFileSync(fullPath, "utf8");
-             memoryContext += `\n--- ${relPath} ---\n${code.substring(0, 1000)}${code.length > 1000 ? "\n... (truncated)" : ""}\n`;
-           } else {
-             memoryContext += `\n--- ${relPath} (File not found) ---\n`;
-           }
-         } catch(e) {
-           memoryContext += `\n--- ${relPath} (Error reading file) ---\n`;
-         }
+      const activeFilesList = Array.isArray(context.workingMemory.activeFiles)
+        ? context.workingMemory.activeFiles
+        : [];
+      activeFilesList.forEach((relPath) => {
+        if (typeof relPath !== "string") return;
+        try {
+          const fullPath = path.resolve(args.workspaceRoot, relPath);
+          if (fs.existsSync(fullPath)) {
+            const code = fs.readFileSync(fullPath, "utf8");
+            memoryContext += `\n--- ${relPath} ---\n${code.substring(0, 1000)}${code.length > 1000 ? "\n... (truncated)" : ""}\n`;
+          } else {
+            memoryContext += `\n--- ${relPath} (File not found) ---\n`;
+          }
+        } catch (e) {
+          memoryContext += `\n--- ${relPath} (Error reading file) ---\n`;
+        }
       });
     }
     if (context.failureMemory && context.failureMemory.length > 0) {
-      memoryContext += "\n\nFailure Memory (Avoid repeating these mistakes):\n" + JSON.stringify(context.failureMemory, null, 2);
+      memoryContext +=
+        "\n\nFailure Memory (Avoid repeating these mistakes):\n" +
+        JSON.stringify(context.failureMemory, null, 2);
+    }
+    if (context.executionLogs && context.executionLogs.length > 0) {
+      const activeLogs = context.executionLogs.map(log => ({
+        command: log.command,
+        status: log.status,
+        stdout: log.stdout ? log.stdout.slice(-100) : [],
+        stderr: log.stderr ? log.stderr.slice(-100) : [],
+        exitCode: log.exitCode
+      }));
+      memoryContext +=
+        "\n\nActive Execution Logs (Last 100 lines):\n" +
+        JSON.stringify(activeLogs, null, 2);
     }
 
     // --- Upgrade: Semantic Vector Search Retrieval (RAG) ---
@@ -85,12 +119,79 @@ async function runPlanner(context, args) {
       if (ragResults.status === "success" && ragResults.results.length > 0) {
         semanticContext = "\n\nSemantic Context (Relevant Code Skeletons):\n";
         ragResults.results.forEach((res, i) => {
-          const contentToInject = res.skeleton && res.skeleton.trim() !== '' ? res.skeleton : res.code;
+          const contentToInject =
+            res.skeleton && res.skeleton.trim() !== ""
+              ? res.skeleton
+              : res.code;
           semanticContext += `\n--- [${i + 1}] ${res.filePath} (${res.chunkType}: ${res.name}) ---\n${contentToInject}\n`;
         });
       }
     } catch (ragErr) {
       console.warn("[Planner] RAG retrieval failed:", ragErr.message);
+    }
+
+    let systemPromptOverride = PLANNER_SYSTEM_PROMPT;
+    
+    // --- Phase 6: Dynamic Tool Capability Registry (Contract Layer) ---
+    const { TOOL_REGISTRY } = require("./toolRegistry");
+    const registryKeys = Object.keys(TOOL_REGISTRY);
+    const registryDescriptions = registryKeys.map(key => {
+      const tool = TOOL_REGISTRY[key];
+      return `- '${key}': ${tool.description}\n  Schema: ${JSON.stringify(tool.schema)}${tool.allowedCommands ? `\n  Allowed base commands: ${JSON.stringify(tool.allowedCommands)}` : ""}`;
+    }).join("\n");
+
+    const toolRegistryPrompt = `
+[TOOL CAPABILITY REGISTRY]
+You MUST ONLY use the tools explicitly defined in this registry. DO NOT invent tools like 'terminal.powershell' or 'terminal.npm'. If you need to run a CLI tool, use 'terminal.exec' with the appropriate 'cmd'.
+Raw command strings are blocked; you must pass arguments as an array using the strict JSON schema.
+
+Available Tools:
+${registryDescriptions}
+`;
+    
+    // --- Phase 4 & 5: Action Policy Layer ---
+    let actionPolicy = "Standard Execution Policy";
+    if (context.currentIntent) {
+      const risk = context.currentIntent.risk_level || "low";
+      if (risk === "low" && !context.currentIntent.needs_rag) {
+        actionPolicy = "FAST EXECUTION: Execute immediately, minimize redundant verification steps to save budget.";
+      } else if (risk === "high") {
+        actionPolicy = "SAFE EXECUTION: High risk detected. Perform incremental changes. Actively verify file states and use execution constraints.";
+      } else if (context.currentIntent.intent === "ARCHITECTURE_MODIFICATION") {
+        actionPolicy = "DEEP REFACTOR: Rely heavily on World Model causality graph. Check all impacted dependencies before and after edits.";
+      }
+    }
+
+    // --- Phase 5 & 7: Goal Priority & OS-Boundary Filter ---
+    actionPolicy += `\n\n[OS-BOUNDARY FILTER] 
+CRITICAL RULE: You are a coding-only executor inside a workspace sandbox, NOT a DevOps administrator or OS repair agent.
+- NEVER attempt to install system dependencies (like Node, npm, git).
+- NEVER attempt to modify system PATH or write scripts to probe the host operating system.
+- NEVER attempt to repair the runtime environment.
+If a core binary (like Node or npm) is missing, DO NOT attempt to fix it or create fallback scripts. Immediately fail the task, report the issue, and explicitly ask the human user to install it. You must ONLY write code for the target application, never for OS-level diagnostics.`;
+
+    // --- Phase 4: Dynamic Task Mutation ---
+    let taskMutationPrompt = "";
+    if (context.status === "REPLAN_NEEDED") {
+      taskMutationPrompt = "\n\n[CRITICAL: DYNAMIC TASK MUTATION REQUIRED]\nThe previous action failed execution validation. You MUST split the failing task into smaller, safer chunks, or reprioritize upstream dependencies. Do not just repeat the same plan.";
+    }
+
+    // --- Phase 4 & 7: DAG Task Generation & Phase Isolation ---
+    const dagPrompt = `\n\n[COGNITIVE DAG PLANNING (PHASE ISOLATION)]
+Your strategy is constrained by the Action Policy: ${actionPolicy}
+${taskMutationPrompt}
+CRITICAL RULE 1 (DAG Chunking): Do not attempt to build the entire goal in one plan. You MUST use DAG Chunking. Output a maximum of 3 to 4 execution steps representing a single phase (e.g., "Phase 1: Scaffold").
+CRITICAL RULE 2 (Phase Lock): You must assign a strict 'phase' string to EVERY step. ALL steps in your plan MUST share the exact same 'phase' string. Do not mix UI code generation with scaffolding in a single plan chunk. You will be re-invoked to plan Phase 2 later.
+When outputting multi-step plans, visualize them as a Directed Acyclic Graph (DAG). Think about dependencies: what must happen before X?`;
+
+    systemPromptOverride += toolRegistryPrompt + dagPrompt;
+
+    if (context.recentMessages && context.recentMessages.length > 0) {
+      const lastMessage =
+        context.recentMessages[context.recentMessages.length - 1];
+      if (lastMessage.includes("[TOOL_RESULT]")) {
+        systemPromptOverride += `\n\n[CRITICAL STATE: TOOL_RESULT_PROCESSING]\nYou have just executed a tool. The tool result is the LAST message in the history context below.\nCRITICAL INSTRUCTION: You MUST ONLY base your next action or response on the Tool Result. \nDO NOT guess. DO NOT add external world knowledge. DO NOT hallucinate facts to fill in blanks.\nIf the tool result is empty or failed, your 'response' MUST explicitly state that the tool output was empty or failed.`;
+      }
     }
 
     const messages = [
@@ -103,9 +204,18 @@ async function runPlanner(context, args) {
     let attemptModels = [
       { provider: args.provider, model: args.model },
       { provider: "gemini", model: "gemini-1.5-flash" },
-      { provider: "openrouter", model: "qwen/qwen-2.5-coder-32b-instruct:free" },
-      { provider: "openrouter", model: "google/gemini-2.0-flash-lite-preview-02-05:free" },
-      { provider: "openrouter", model: "meta-llama/llama-3.3-70b-instruct:free" },
+      {
+        provider: "openrouter",
+        model: "qwen/qwen-2.5-coder-32b-instruct:free",
+      },
+      {
+        provider: "openrouter",
+        model: "google/gemini-2.0-flash-lite-preview-02-05:free",
+      },
+      {
+        provider: "openrouter",
+        model: "meta-llama/llama-3.3-70b-instruct:free",
+      },
     ];
 
     let reply = null;
@@ -116,27 +226,48 @@ async function runPlanner(context, args) {
 
     for (const m of attemptModels) {
       if (!m.provider || !m.model) continue;
-      try {
-        const res = await callLLM({
-          messages,
-          system: PLANNER_SYSTEM_PROMPT,
-          model: m.model,
-          provider: m.provider,
-          onChunk: null, // Don't stream JSON bracket generation to user UI
-          signal,
-        });
-        reply = res.reply;
-        tokenUsage = res.tokenUsage;
-        console.log(
-          `[Planner] Successfully generated plan using ${m.provider}/${m.model}`,
-        );
-        break; // Success!
-      } catch (err) {
-        lastErr = err;
-        console.warn(
-          `[Planner] LLM call failed for ${m.provider}/${m.model}: ${err.message}. Retrying fallback...`,
-        );
+
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          const res = await callLLM({
+            messages,
+            system: systemPromptOverride,
+            model: m.model,
+            provider: m.provider,
+            onChunk: null, // Don't stream JSON bracket generation to user UI
+            signal,
+          });
+          reply = res.reply;
+          tokenUsage = res.tokenUsage;
+          console.log(
+            `[Planner] Successfully generated plan using ${m.provider}/${m.model}`,
+          );
+          break; // Success!
+        } catch (err) {
+          lastErr = err;
+          const isRateLimit = /429|quota|rate.?limit|too.?many.?requests/i.test(
+            err.message,
+          );
+
+          if (isRateLimit && retries > 1) {
+            retries--;
+            console.warn(
+              `[Planner] Rate limit for ${m.provider}/${m.model}. Retrying in 3s... (${retries} retries left)`,
+            );
+            if (onStatus)
+              onStatus(`⏳ Rate limited. Retrying automatically...`);
+            await new Promise((r) => setTimeout(r, 3000));
+            continue; // Retry same model
+          }
+
+          console.warn(
+            `[Planner] LLM call failed for ${m.provider}/${m.model}: ${err.message}. Retrying fallback...`,
+          );
+          break; // Break while loop to fallback to next model
+        }
       }
+      if (reply) break; // Break outer model fallback loop if successful
     }
 
     if (!reply && lastErr) {
@@ -144,47 +275,74 @@ async function runPlanner(context, args) {
     }
 
     // Extract JSON object from LLM reply securely
-    let cleanJson = reply.replace(/```json/g, "").replace(/```/g, "").trim();
-    const startIdx = cleanJson.indexOf('{');
-    const endIdx = cleanJson.lastIndexOf('}');
+    let cleanJson = reply
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+    const startIdx = cleanJson.indexOf("{");
+    const endIdx = cleanJson.lastIndexOf("}");
     if (startIdx !== -1 && endIdx !== -1) {
       cleanJson = cleanJson.substring(startIdx, endIdx + 1);
-      
+
       // Try native parsing first (in case it is perfectly valid)
       try {
-        const action = JSON.parse(cleanJson);
+        const rawAction = JSON.parse(cleanJson);
+        const PlanSchema = require("zod").z.object({
+          thought: require("zod").z.string().optional(),
+          task_update: require("zod").z.object({
+            current_step: require("zod").z.string().optional(),
+            completed: require("zod").z.array(require("zod").z.string()).optional(),
+            active: require("zod").z.array(require("zod").z.string()).optional(),
+            pending: require("zod").z.array(require("zod").z.string()).optional(),
+            activeFiles: require("zod").z.array(require("zod").z.string()).optional()
+          }).optional(),
+            steps: require("zod").z.array(require("zod").z.object({
+              id: require("zod").z.number().optional(),
+              phase: require("zod").z.string(),
+              action: require("zod").z.string().optional(),
+              tool: require("zod").z.string(),
+              input: require("zod").z.any()
+            })).optional()
+          });
+        const parsed = PlanSchema.safeParse(rawAction);
+        if (!parsed.success) {
+           throw new Error(`Zod Schema Validation Failed: ${parsed.error.message}`);
+        }
+        const action = parsed.data;
         action._tokenUsage = tokenUsage;
         return action;
       } catch (nativeParseErr) {
         // Fallback: Sanitize unescaped control characters in JSON strings if any
         let fixedJson = "";
         let inString = false;
-      let isEscaped = false;
-      for (let i = 0; i < cleanJson.length; i++) {
-        const char = cleanJson[i];
-        if (char === '"' && !isEscaped) {
-          inString = !inString;
-          fixedJson += char;
-        } else if (char === "\\" && !isEscaped) {
-          isEscaped = true;
-          fixedJson += char;
-        } else {
-          if (isEscaped) {
-            // Validate JSON escape sequence. If invalid, double-escape the backslash.
-            if (!['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'].includes(char)) {
-              fixedJson += "\\";
-            }
+        let isEscaped = false;
+        for (let i = 0; i < cleanJson.length; i++) {
+          const char = cleanJson[i];
+          if (char === '"' && !isEscaped) {
+            inString = !inString;
             fixedJson += char;
-            isEscaped = false;
+          } else if (char === "\\" && !isEscaped) {
+            isEscaped = true;
+            fixedJson += char;
           } else {
-            if (inString && char === "\n") fixedJson += "\\n";
-            else if (inString && char === "\r") fixedJson += "\\r";
-            else if (inString && char === "\t") fixedJson += "\\t";
-            else fixedJson += char;
+            if (isEscaped) {
+              // Validate JSON escape sequence. If invalid, double-escape the backslash.
+              if (
+                !['"', "\\", "/", "b", "f", "n", "r", "t", "u"].includes(char)
+              ) {
+                fixedJson += "\\";
+              }
+              fixedJson += char;
+              isEscaped = false;
+            } else {
+              if (inString && char === "\n") fixedJson += "\\n";
+              else if (inString && char === "\r") fixedJson += "\\r";
+              else if (inString && char === "\t") fixedJson += "\\t";
+              else fixedJson += char;
+            }
           }
         }
-      }
-      
+
         try {
           const action = JSON.parse(fixedJson);
           action._tokenUsage = tokenUsage;
@@ -193,20 +351,50 @@ async function runPlanner(context, args) {
           // Final fallback for completely broken JSON (e.g., unescaped quotes inside strings)
           // Attempt a regex repair to escape unescaped inner quotes in string values.
           try {
-            // Find all string values and escape inner quotes
-            let repairedJson = cleanJson.replace(/:\s*"([^]*?)"(\s*[,}])/g, (match, p1, p2) => {
-               // Only escape quotes that are not already escaped by a backslash
-               const escaped = p1.replace(/(?<!\\)"/g, '\\"');
-               return ': "' + escaped + '"' + p2;
-            });
+            // Find all string values and escape inner quotes and physical newlines
+            let repairedJson = cleanJson.replace(
+              /:\s*"([^]*?)"(\s*[,}])/g,
+              (match, p1, p2) => {
+                // Only escape quotes that are not already escaped by a backslash
+                let escaped = p1.replace(/(?<!\\)"/g, '\\"');
+                // Escape physical control characters
+                escaped = escaped
+                  .replace(/\n/g, "\\n")
+                  .replace(/\r/g, "\\r")
+                  .replace(/\t/g, "\\t");
+                return ': "' + escaped + '"' + p2;
+              },
+            );
             // Try parsing one last time
-            const action = JSON.parse(repairedJson);
+            const rawAction = JSON.parse(repairedJson);
+            const PlanSchema = require("zod").z.object({
+              thought: require("zod").z.string().optional(),
+              task_update: require("zod").z.object({
+                current_step: require("zod").z.string().optional(),
+                completed: require("zod").z.array(require("zod").z.string()).optional(),
+                active: require("zod").z.array(require("zod").z.string()).optional(),
+                pending: require("zod").z.array(require("zod").z.string()).optional(),
+                activeFiles: require("zod").z.array(require("zod").z.string()).optional()
+              }).optional(),
+              steps: require("zod").z.array(require("zod").z.object({
+                id: require("zod").z.number().optional(),
+                phase: require("zod").z.string(),
+                action: require("zod").z.string().optional(),
+                tool: require("zod").z.string(),
+                input: require("zod").z.any()
+              })).optional()
+            });
+            const parsed = PlanSchema.safeParse(rawAction);
+            if (!parsed.success) {
+               throw new Error(`Zod Schema Validation Failed: ${parsed.error.message}`);
+            }
+            const action = parsed.data;
             action._tokenUsage = tokenUsage;
             return action;
           } catch (repairErr) {
             if (onStatus) onStatus("❌ Fatal: LLM produced malformed JSON.");
             console.error("JSON Parse Error:", parseErr, "Payload:", fixedJson);
-            throw new Error(`LLM generated invalid JSON format. ${parseErr.message}`);
+            throw new Error(`LLM generated invalid JSON format. ${repairErr.message}`);
           }
         }
       }

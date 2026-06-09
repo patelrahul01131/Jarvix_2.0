@@ -459,11 +459,6 @@ export default function MessageBubble({
             ))}
           </div>
         )}
-
-        {/* Token badge */}
-        {isAssistant && !isStreaming && (
-          <TokenBadge usage={message.tokenUsage} />
-        )}
       </div>
     </div>
   );
