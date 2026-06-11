@@ -234,7 +234,10 @@ function activate(context) {
               },
 
               onState: (stateUpdate) => {
-                panel.webview.postMessage({ type: "AGENT_STATE", ...stateUpdate });
+                panel.webview.postMessage({
+                  type: "AGENT_STATE",
+                  ...stateUpdate,
+                });
               },
 
               onChunk: (partialReply) => {
@@ -335,6 +338,7 @@ function activate(context) {
               });
             }
 
+            let _activeRuntime = null;
             activeAbortController = new AbortController();
             await askAgent({
               workspaceRoot: getWorkspaceRoot(),
@@ -349,6 +353,29 @@ function activate(context) {
 
               onStatus: (status) => {
                 panel.webview.postMessage({ type: "status", status });
+              },
+
+              // ── Runtime progress → UI ──────────────────────────────────────
+              onState: (stateUpdate) => {
+                panel.webview.postMessage({
+                  type: "AGENT_STATE",
+                  ...stateUpdate,
+                });
+                // Cache the runtime reference so we can pause/resume it later
+                if (
+                  stateUpdate.type !== "EXECUTION_PROGRESS" &&
+                  stateUpdate._runtime
+                ) {
+                  _activeRuntime = stateUpdate._runtime;
+                }
+              },
+
+              onProgress: (progressEvent) => {
+                panel.webview.postMessage({
+                  type: "EXECUTION_PROGRESS",
+                  sessionId: msg.sessionId,
+                  ...progressEvent,
+                });
               },
 
               onChunk: (partialReply) => {
@@ -377,6 +404,7 @@ function activate(context) {
               },
             });
             activeAbortController = null;
+            _activeRuntime = null;
 
             panel.webview.postMessage({
               type: "reply",
@@ -454,7 +482,12 @@ function activate(context) {
         }
 
         case "deleteSession": {
-          deleteSession(msg.sessionId);
+          if (msg.sessionId) deleteSession(msg.sessionId);
+          break;
+        }
+
+        case "clearAllSessions": {
+          clearAllSessions();
           break;
         }
 
@@ -541,6 +574,35 @@ function activate(context) {
           break;
         }
 
+        case "undoDeclinePendingFile": {
+          const sessions = getAllSessions();
+          const session = sessions[msg.sessionId];
+          if (session && session.messages[msg.messageIndex]) {
+            const fileEdits = session.messages[msg.messageIndex].fileEdits;
+            if (fileEdits && fileEdits[msg.fileIndex]) {
+              fileEdits[msg.fileIndex].status = "pending";
+
+              // Remove the TOOL VERIFICATION declined message to clean up the timeline
+              const targetPath = fileEdits[msg.fileIndex].filePath;
+              session.messages = session.messages.filter(
+                (m) =>
+                  !(
+                    m.role === "system" &&
+                    m.content.includes("DECLINED file action") &&
+                    m.content.includes(targetPath)
+                  ),
+              );
+
+              saveSession(msg.sessionId, session);
+            }
+          }
+          panel.webview.postMessage({
+            type: "sessionsLoaded",
+            sessions: getAllSessions(),
+          });
+          break;
+        }
+
         case "runTerminalCommand": {
           try {
             const sessions = getAllSessions();
@@ -569,7 +631,10 @@ function activate(context) {
               status: `[${new Date().toLocaleTimeString()}] ⚙️ Executing command: ${msg.command}...`,
             });
 
-            const proc = spawn(msg.command, { shell: true, cwd });
+            const proc = spawn(msg.command, {
+              shell: process.platform === "win32" ? "powershell.exe" : true,
+              cwd,
+            });
 
             const currentSession = getAllSessions()[msg.sessionId];
 
@@ -817,6 +882,44 @@ function activate(context) {
               "Failed to open diff: " + err.message,
             );
           }
+          break;
+        }
+        // ── Runtime control messages ──────────────────────────────────────────
+        case "runtimePause": {
+          // The runtime reference is stored on args._runtime inside askAgent
+          // We send a special status so the UI knows we're pausing
+          panel.webview.postMessage({
+            type: "EXECUTION_PROGRESS",
+            sessionId: msg.sessionId,
+            event: "RUNTIME_PAUSE_REQUESTED",
+            timestamp: Date.now(),
+          });
+          // The runtime will honour the pause signal on next step boundary
+          break;
+        }
+
+        case "runtimeResume": {
+          panel.webview.postMessage({
+            type: "EXECUTION_PROGRESS",
+            sessionId: msg.sessionId,
+            event: "RUNTIME_RESUMED",
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
+        case "runtimeAbort": {
+          if (activeAbortController) {
+            activeAbortController.abort();
+            activeAbortController = null;
+          }
+          panel.webview.postMessage({
+            type: "EXECUTION_PROGRESS",
+            sessionId: msg.sessionId,
+            event: "RUNTIME_ABORTED",
+            timestamp: Date.now(),
+          });
+          panel.webview.postMessage({ type: "generationStopped" });
           break;
         }
       }

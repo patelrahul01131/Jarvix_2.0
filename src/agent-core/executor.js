@@ -7,6 +7,7 @@ const { TOOL_REGISTRY } = require("./toolRegistry");
 
 async function runExecutor(step, context, args) {
   const { onChunk, onStatus } = args;
+  const startTime = Date.now();
 
   const toolName = step.tool;
   const toolDefinition = TOOL_REGISTRY[toolName];
@@ -17,7 +18,7 @@ async function runExecutor(step, context, args) {
       success: false,
       stdout: "",
       stderr: `TOOL_HALLUCINATION_ERROR: The requested tool '${toolName}' is not registered in TOOL_REGISTRY. You must only use listed tools.`,
-      status: "REPLAN_NEEDED"
+      status: "REPLAN_NEEDED",
     };
   }
 
@@ -25,21 +26,57 @@ async function runExecutor(step, context, args) {
   const input = step.input || {};
   if (toolDefinition.schema) {
     for (const key of Object.keys(toolDefinition.schema)) {
-      if (toolDefinition.schema[key] === "string" && typeof input[key] !== "string") {
-        return { success: false, stderr: `SCHEMA_ERROR: Tool '${toolName}' requires '${key}' to be a string.`, status: "REPLAN_NEEDED" };
+      const expectedType = toolDefinition.schema[key];
+      const isOptional = expectedType.endsWith("?");
+      const baseType = isOptional ? expectedType.slice(0, -1) : expectedType;
+
+      if (input[key] === undefined || input[key] === null) {
+        if (!isOptional) {
+          return {
+            success: false,
+            stderr: `SCHEMA_ERROR: Tool '${toolName}' requires missing property '${key}'.`,
+            status: "REPLAN_NEEDED",
+          };
+        }
+        continue;
       }
-      if (toolDefinition.schema[key] === "array" && !Array.isArray(input[key])) {
-        return { success: false, stderr: `SCHEMA_ERROR: Tool '${toolName}' requires '${key}' to be an array.`, status: "REPLAN_NEEDED" };
+
+      if (
+        baseType === "string" &&
+        typeof input[key] !== "string"
+      ) {
+        return {
+          success: false,
+          stderr: `SCHEMA_ERROR: Tool '${toolName}' requires '${key}' to be a string.`,
+          status: "REPLAN_NEEDED",
+        };
+      }
+      if (
+        baseType === "array" &&
+        !Array.isArray(input[key])
+      ) {
+        return {
+          success: false,
+          stderr: `SCHEMA_ERROR: Tool '${toolName}' requires '${key}' to be an array.`,
+          status: "REPLAN_NEEDED",
+        };
       }
     }
   }
 
   // --- POLICY ENGINE ---
   if (toolDefinition.risk === "high") {
-    if (onStatus) onStatus(`⚠️ High-Risk Action Detected: ${toolName}. Proceeding with caution.`);
+    if (onStatus)
+      onStatus(
+        `⚠️ High-Risk Action Detected: ${toolName}. Proceeding with caution.`,
+      );
   }
 
   if (onStatus) onStatus(`⚙️ Executing Step: ${toolName}`);
+  console.log("\n=========================");
+  console.log("[DEBUG] TOOL NAME:", toolName);
+  console.log("[DEBUG] TASK:", JSON.stringify(step, null, 2));
+  console.log("=========================\n");
 
   let executionOutput = "";
 
@@ -60,7 +97,8 @@ async function runExecutor(step, context, args) {
       if (args.workspaceRoot) {
         const fullPath = path.resolve(args.workspaceRoot, step.input.path);
         const resolvedRoot = path.resolve(args.workspaceRoot);
-        if (!fullPath.startsWith(resolvedRoot)) {
+        const relativePath = path.relative(resolvedRoot, fullPath);
+        if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
           throw new Error(
             "Security Violation: Cannot write files outside of the workspace directory.",
           );
@@ -117,7 +155,8 @@ async function runExecutor(step, context, args) {
 
       const fullPath = path.resolve(args.workspaceRoot, step.input.path);
       const resolvedRoot = path.resolve(args.workspaceRoot);
-      if (!fullPath.startsWith(resolvedRoot)) {
+      const relativePath = path.relative(resolvedRoot, fullPath);
+      if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
         throw new Error(
           "Security Violation: Cannot write files outside of the workspace directory.",
         );
@@ -179,7 +218,8 @@ async function runExecutor(step, context, args) {
       }
       const fullPath = path.resolve(args.workspaceRoot, step.input.path);
       const resolvedRoot = path.resolve(args.workspaceRoot);
-      if (!fullPath.startsWith(resolvedRoot)) {
+      const relativePath = path.relative(resolvedRoot, fullPath);
+      if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
         throw new Error(
           "Security Violation: Cannot read files outside of the workspace directory.",
         );
@@ -192,49 +232,58 @@ async function runExecutor(step, context, args) {
       const content = fs.readFileSync(fullPath, "utf-8");
       executionOutput += `\nRead file: ${step.input.path}\nContent:\n${content.substring(0, 1000)}${content.length > 1000 ? "\n... (truncated)" : ""}`;
     } else if (toolName === "terminal.exec") {
-      if (!args.workspaceRoot) throw new Error("Tool Execution Failed: No workspace root access.");
+      const path = require("path");
+      if (!args.workspaceRoot)
+        throw new Error("Tool Execution Failed: No workspace root access.");
 
       const cmd = step.input.cmd;
       const cmdArgs = step.input.args;
 
       if (!toolDefinition.allowedCommands.includes(cmd)) {
-        throw new Error(`SECURITY_VIOLATION: Command '${cmd}' is not in the allowedCommands list for terminal.exec.`);
+        throw new Error(
+          `SECURITY_VIOLATION: Command '${cmd}' is not in the allowedCommands list for terminal.exec.`,
+        );
       }
 
       if (args.proposeTerminalCommand) {
-        args.proposeTerminalCommand({ command: `${cmd} ${cmdArgs.join(" ")}` });
-        executionOutput += `\nProposed terminal command: ${cmd} ${cmdArgs.join(" ")}`;
+        const targetCwd = step.input.cwd ? ` (in ${step.input.cwd})` : "";
+        args.proposeTerminalCommand({ command: `${cmd} ${cmdArgs.join(" ")}${targetCwd}` });
+        executionOutput += `\nProposed terminal command: ${cmd} ${cmdArgs.join(" ")}${targetCwd}`;
       } else {
         const { spawn } = require("child_process");
         const isWin = process.platform === "win32";
-        
+
         let actualCmd = cmd;
         if (isWin && cmd === "npm") actualCmd = "npm.cmd";
         if (isWin && cmd === "npx") actualCmd = "npx.cmd";
 
         executionOutput += `\nExecuting tokenized command: ${cmd} ${JSON.stringify(cmdArgs)}`;
-        
+
         await new Promise((resolve, reject) => {
           const child = spawn(actualCmd, cmdArgs, {
-            cwd: args.workspaceRoot,
+            cwd: step.input.cwd ? path.resolve(args.workspaceRoot, step.input.cwd) : args.workspaceRoot,
             shell: false, // EXPLICITLY DISABLED FOR SECURITY
           });
 
           let stdout = "";
           let stderr = "";
 
-          child.stdout.on("data", (data) => stdout += data.toString());
-          child.stderr.on("data", (data) => stderr += data.toString());
+          child.stdout.on("data", (data) => (stdout += data.toString()));
+          child.stderr.on("data", (data) => (stderr += data.toString()));
 
           child.on("close", (code) => {
             executionOutput += `\nOutput: ${stdout}\n${stderr}`;
             if (code !== 0) {
-               reject(new Error(`Command exited with code ${code}.\nStderr: ${stderr}\nStdout: ${stdout}`));
+              const err = new Error(
+                `Command exited with code ${code}.\nStderr: ${stderr}\nStdout: ${stdout}`,
+              );
+              err.exitCode = code;
+              reject(err);
             } else {
-               resolve();
+              resolve(code);
             }
           });
-          
+
           child.on("error", (err) => {
             reject(new Error(`Spawn failed: ${err.message}`));
           });
@@ -247,8 +296,11 @@ async function runExecutor(step, context, args) {
         throw new Error("Tool Execution Failed: No workspace root access.");
 
       const fullPath = path.resolve(args.workspaceRoot, step.input.path || "");
-      if (!fullPath.startsWith(path.resolve(args.workspaceRoot)))
+      const resolvedRoot = path.resolve(args.workspaceRoot);
+      const relativePath = path.relative(resolvedRoot, fullPath);
+      if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
         throw new Error("Security Violation.");
+      }
       if (!fs.existsSync(fullPath))
         throw new Error(`Directory not found: ${step.input.path}`);
 
@@ -278,19 +330,27 @@ async function runExecutor(step, context, args) {
       executionOutput += `\nResponded to user.`;
     }
 
-    return {
+    const res = {
       success: true,
       stdout: executionOutput,
       stderr: "",
+      exitCode: 0,
+      durationMs: Date.now() - startTime,
     };
+    console.log("[DEBUG] EXECUTOR RESULT:", res);
+    return res;
   } catch (err) {
     console.error("[Executor] Execution failed:", err.message);
     // Suppress raw error leaks to the UI; it will be handled by Fixer Node or Status Panel
-    return {
+    const errRes = {
       success: false,
       stdout: "",
       stderr: err.message,
+      exitCode: err.exitCode !== undefined ? err.exitCode : 1,
+      durationMs: Date.now() - startTime,
     };
+    console.log("[DEBUG] EXECUTOR FAILED:", errRes);
+    return errRes;
   }
 }
 

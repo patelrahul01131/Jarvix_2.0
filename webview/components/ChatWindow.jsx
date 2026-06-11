@@ -6,18 +6,7 @@ import AgentStatusPanel from './AgentStatusPanel';
 export default function ChatWindow({
   messages,
   isLoading,
-  onApplyCode,
   statusHistory,
-  onAcceptFile,
-  onDeclineFile,
-  onAcceptAllFiles,
-  onDeclineAllFiles,
-  onAcceptCommand,
-  onDeclineCommand,
-  onApprovePlan,
-  onEdit,
-  onRegenerate,
-  onViewDiff,
   streamingMessage,   // { content, sessionId } — isolated streaming state
   activeSessionId,
 }) {
@@ -57,10 +46,7 @@ export default function ChatWindow({
     );
   }
 
-  // Filter out system messages, but retain their original index
-  const displayItems = messages
-    .map((msg, index) => ({ msg, index }))
-    .filter(item => item.msg.role !== 'system');
+  const displayItems = messages.map((msg, index) => ({ msg, index }));
 
   // Build the full list of items to render.
   // The streaming bubble is rendered as a separate final item while active.
@@ -77,17 +63,6 @@ export default function ChatWindow({
             message={{ role: 'assistant', content: streamingMessage.content, streaming: true }}
             messageIndex={-1}
             isLastAssistant={false}
-            onApplyCode={onApplyCode}
-            onAcceptFile={onAcceptFile}
-            onDeclineFile={onDeclineFile}
-            onAcceptAllFiles={onAcceptAllFiles}
-            onDeclineAllFiles={onDeclineAllFiles}
-            onAcceptCommand={onAcceptCommand}
-            onDeclineCommand={onDeclineCommand}
-            onApprovePlan={onApprovePlan}
-            onEdit={onEdit}
-            onRegenerate={onRegenerate}
-            onViewDiff={onViewDiff}
           />
         );
       }
@@ -110,17 +85,6 @@ export default function ChatWindow({
         message={msg}
         messageIndex={origIndex}
         isLastAssistant={origIndex === lastAssistantIdx && !isLoading}
-        onApplyCode={onApplyCode}
-        onAcceptFile={onAcceptFile}
-        onDeclineFile={onDeclineFile}
-        onAcceptAllFiles={onAcceptAllFiles}
-        onDeclineAllFiles={onDeclineAllFiles}
-        onAcceptCommand={onAcceptCommand}
-        onDeclineCommand={onDeclineCommand}
-        onApprovePlan={onApprovePlan}
-        onEdit={onEdit}
-        onRegenerate={onRegenerate}
-        onViewDiff={onViewDiff}
       />
     );
   }

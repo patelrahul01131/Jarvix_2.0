@@ -22,10 +22,20 @@ function ensureDir() {
 
 // ─── Resolve the path to a session file ─────────────────────────────────────
 function sessionFilePath(sessionId) {
+  if (!sessionId) return null;
   // Sanitize the sessionId to prevent path traversal
-  const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, "_");
+  const safe = String(sessionId).replace(/[^a-zA-Z0-9_\-]/g, "_");
   return path.join(SESSIONS_DIR, `${safe}.json`);
 }
+
+// 💡 Example:
+// Input	              Output
+// user/123	          user_123
+// abc..\\..	        abc____
+// session@1!	        session_1_
+
+
+
 
 // ─── Migrate legacy sessions.json → individual files ─────────────────────────
 // Called once on startup. Non-destructive — leaves sessions.json as a backup.
@@ -261,9 +271,10 @@ Return only the summary text.`;
       const res = await callLLM({
         messages: [{ role: "user", content: rawTranscript }],
         system: systemPrompt,
-        model: "meta-llama/llama-3.3-70b-instruct:free",
-        provider: "openrouter",
+        model: "open-mistral-7b",
+        provider: "mistral",
         onChunk: null,
+        signal: new AbortController().signal,
       });
       summaryText = res.reply.trim();
     } catch (e) {

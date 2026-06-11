@@ -10,12 +10,13 @@ const TOOL_REGISTRY = {
     schema: {
       cmd: "string", // Must be one of allowedCommands
       args: "array", // Array of string arguments
+      cwd: "string?", // Optional relative path to run the command in
     },
     allowedCommands: ["npm", "node", "git", "npx"],
     risk: "medium",
   },
   "fs.writeFile": {
-    description: "Write content to a file. Overwrites if exists.",
+    description: "Write content to a new file. Parent directories are automatically created if they don't exist. Do not use terminal commands like mkdir.",
     schema: {
       path: "string",
       content: "string",

@@ -1,52 +1,75 @@
 /**
- * Execution Validator
- * Acts as the anti-hallucination layer. Verifies that the tool output matches reality
- * before updating the TruthState.
+ * Validation Node
+ * Pre-execution validation. Catches obvious errors or tool misuses
+ * in the generated plan BEFORE asking the user for approval.
  */
-
 const fs = require('fs');
 const path = require('path');
 
 async function runValidator(state, args) {
-  let truthState = { ...state.truthState };
-  const lastResult = state.lastResult;
-  const action = state.action;
+  if (args && args.onStatus) args.onStatus(`[${new Date().toLocaleTimeString()}] 🛡️ Validating Execution Plan...`);
 
-  if (!lastResult || !action) {
-    return truthState;
-  }
+  const plan = state.action || {};
+  const steps = plan.executionPlan || [];
+  let validationErrors = [];
 
-  // Verify file operations
-  if (action.tool === "fs.writeFile" || action.tool === "fs.editFile") {
-    try {
-      const fullPath = path.resolve(args.workspaceRoot, action.input.path);
-      if (fs.existsSync(fullPath)) {
-        // Truth: The file exists.
-        if (!truthState.files) truthState.files = {};
-        truthState.files[action.input.path] = {
-          exists: true,
-          lastModified: Date.now(),
-          verified: true
-        };
-      } else {
-        // Truth: The file does NOT exist, despite the tool execution.
-        if (!truthState.files) truthState.files = {};
-        truthState.files[action.input.path] = {
-          exists: false,
-          verified: false
-        };
-        // Override lastResult success since validation failed
-        lastResult.success = false;
-        lastResult.stderr = `Validation Error: File ${action.input.path} was expected to be written but does not exist.`;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const tool = step.tool;
+    const input = step.input || {};
+
+    // 1. Pre-flight checks for file existence
+    if (tool === "fs.readFile" || tool === "fs.editFile" || tool === "fs.deleteFile") {
+      if (input.path) {
+        const fullPath = path.resolve(args.workspaceRoot, input.path);
+        if (!fs.existsSync(fullPath)) {
+          validationErrors.push(`Step ${i+1} (${tool}): Target file does not exist '${input.path}'`);
+        }
       }
-    } catch (e) {
-      console.warn("[Validator] Failed to verify file state:", e.message);
+    }
+
+    // 2. Validate line ranges for fs.editFile
+    if (tool === "fs.editFile" && input.path) {
+      const fullPath = path.resolve(args.workspaceRoot, input.path);
+      if (fs.existsSync(fullPath)) {
+        if (typeof input.startLine !== "number" || typeof input.endLine !== "number") {
+          validationErrors.push(`Step ${i+1} (${tool}): 'startLine' and 'endLine' arguments must be numbers`);
+        } else {
+          const originalCode = fs.readFileSync(fullPath, "utf-8");
+          const lines = originalCode.split("\n");
+          const startIdx = input.startLine - 1;
+          const endIdx = input.endLine - 1;
+          if (startIdx < 0 || endIdx >= lines.length || startIdx > endIdx) {
+            validationErrors.push(
+              `Step ${i+1} (${tool}): Invalid line range ${input.startLine}-${input.endLine}. File '${input.path}' has ${lines.length} lines.`
+            );
+          }
+        }
+      }
     }
   }
 
-  // Future verifications (e.g., shell.exec parsing for specific success strings) can go here
+  if (validationErrors.length > 0) {
+    console.warn("[ValidationNode] Plan rejected:", validationErrors);
+    
+    // Create a fake observation so the Reflection node can process it naturally
+    const fakeObservation = {
+      tool: "ValidationNode",
+      success: false,
+      exitCode: 1,
+      stderr: `Pre-execution validation failed:\n` + validationErrors.join("\n")
+    };
 
-  return truthState;
+    return {
+      status: "INVALID_PLAN",
+      structuredObservation: fakeObservation,
+      lastResult: { success: false, error: fakeObservation.stderr }
+    };
+  }
+
+  return {
+    status: "VALID_PLAN"
+  };
 }
 
 module.exports = { runValidator };

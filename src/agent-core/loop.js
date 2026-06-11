@@ -1,14 +1,62 @@
 /**
  * Agent Core Loop
- * Manages the state machine loop for autonomous task execution.
+ * Manages the cognitive state machine loop for autonomous task execution.
+ * Jarvix 4.0: All cognitive systems fully activated.
  */
 
-const { STATES, transition } = require("./state-machine");
 const { runPlanner } = require("./planner");
 const { runExecutor } = require("./executor");
 const { runReflection } = require("./reflection");
 const { INTENT_CLASSIFIER_PROMPT } = require("../rules/prompts");
 const { getProjectKnowledge } = require("./knowledge");
+const { TaskExecutionRuntime } = require("./runtime/TaskExecutionRuntime");
+
+// Jarvix 3.0 / 4.0 Nodes
+const {
+  runWorkspaceGraphNode: runWorkspaceGraph,
+} = require("./workspace_graph");
+const {
+  runToolCapabilityNode: runToolCapability,
+} = require("./tool_capability");
+const { runValidator } = require("./execution_validator"); // Pre-execution validation
+const { runObservation } = require("./observation");
+const { evaluateGoal: runGoalEvaluator } = require("./goal_evaluator");
+const { runReplanDecision } = require("./replan_decision");
+const ReconciliationNode = require("./reconciliation");
+
+// Jarvix 4.0 Memory & Logic Managers
+const { eventBus, EVENTS } = require("../core/event_bus");
+const { goalManager } = require("./goal_manager");
+const { lockManager } = require("./resource_lock_manager");
+const { memoryManager } = require("../memory/memory_manager");
+const { globalProcessManager } = require("./process_manager");
+const RollbackManager = require("./rollback_manager");
+const StateSerializer = require("../core/state_serializer");
+const DeepWorldModel = require("./worldModel");
+
+// Jarvix 4.0 Singleton setup
+const reconciler = new ReconciliationNode(memoryManager);
+const stateSerializer = new StateSerializer(
+  null,
+  goalManager,
+  memoryManager,
+  lockManager,
+);
+let _snapshotInterval = null;
+
+// Snapshot scheduler - called once on first agent boot
+function _startSnapshotScheduler() {
+  if (_snapshotInterval) return;
+  _snapshotInterval = setInterval(
+    () => {
+      stateSerializer.createSnapshot();
+    },
+    5 * 60 * 1000,
+  ); // every 5 minutes
+  eventBus.on(EVENTS.GOAL_COMPLETED, () => {
+    stateSerializer.createSnapshot();
+  });
+}
 
 const { callLLM } = require("./llmClient");
 const { StateGraph, END, START, Annotation } = require("@langchain/langgraph");
@@ -53,9 +101,9 @@ async function classifyIntent(goal, args) {
   const text = goal.trim().toLowerCase();
   const isShort = text.split(/\s+/).length < 20;
 
-  // Extremely basic fast-path for pure greetings to save LLM calls
+  // Extremely basic fast-path for pure greetings/social replies to save LLM calls
   if (
-    /^(hi|hello|hey|gm|good morning|today is my birthday|i feel)/i.test(text) &&
+    /^(hi|hello|hey|gm|good morning|today is my birthday|i feel|nice|thanks|thank you|cool|perfect|awesome|great|ok|okay)\b/i.test(text) &&
     isShort
   ) {
     return {
@@ -106,6 +154,20 @@ async function classifyIntent(goal, args) {
       "[Agent OS] LLM Intent classification failed, falling back to heuristics.",
       err.message,
     );
+    const textLower = goal.toLowerCase();
+
+    // Goal Management Heuristics
+    if (
+      /^(continue|resume|cancel|stop|prioritize|switch task)/.test(textLower)
+    ) {
+      return {
+        intent: "GOAL_MANAGEMENT",
+        execution_mode: "agent",
+        complexity: 10,
+        requires_planning: false,
+      };
+    }
+
     const isCode =
       goal.includes(".js") ||
       goal.includes("code") ||
@@ -179,18 +241,22 @@ async function runAgentLoop(goal, args) {
     }
   }
 
+  // ─── Phase 5: Activate DeepWorldModel ───────────────────────────────────
+  const worldModelInstance = new DeepWorldModel();
+  if (session?.worldModelData) {
+    worldModelInstance.deserialize(session.worldModelData);
+  }
+  // ──────────────────────────────────────────────────────────────────────────
+
   const initialContext = {
     goal:
       goal || session?.messages.find((m) => m.role === "user")?.content || "",
     args: args,
     errors: [],
+    goalId: session?.goalId || null, // Phase 1: tracked goal
     truthState: session?.truthState || {},
     beliefState: session?.beliefState || {},
-    worldModel: session?.worldModel || {
-      files: {},
-      symbols: {},
-      processes: [],
-    },
+    worldModel: worldModelInstance, // Phase 5: real causal model
     taskGraph: session?.taskGraph || { nodes: [], edges: [] },
     memory: session?.memory || { semantic: [], episodic: [] },
     currentIntent: session?.currentIntent || {},
@@ -228,46 +294,59 @@ async function runAgentLoop(goal, args) {
       session && session.executionLogs ? session.executionLogs : [],
   };
 
-  // If we are resuming from an approved plan, execute all steps sequentially
+  // ─── Task Execution Runtime: replaces the naive for-loop ──────────────────
+  // If we are resuming from an approved plan, run it through the full runtime:
+  // checkpoint → execute → verify → retry → escalate
   if (loadedPlanSteps && loadedPlanSteps.length > 0) {
     if (args.onStatus)
       args.onStatus(
-        `⚙️ Executing Approved Plan (${loadedPlanSteps.length} steps)...`,
+        `⚙️ Jarvix Runtime: Executing ${loadedPlanSteps.length} steps with checkpoint & retry...`,
       );
 
-    for (let i = 0; i < loadedPlanSteps.length; i++) {
-      const step = loadedPlanSteps[i];
-      if (args.onStatus)
-        args.onStatus(
-          `⚙️ Step ${i + 1}/${loadedPlanSteps.length}: ${step.action}`,
-        );
-
-      try {
-        const execRes = await runExecutor(step, initialContext, args);
-        const observation = `system: [TOOL_RESULT] Step ${i + 1}/${loadedPlanSteps.length} executed ${step.tool}. Result: ${execRes.stdout || execRes.stderr}`;
-        initialContext.recentMessages.push(observation);
-        session.messages.push({ role: "system", content: observation });
-        require("../memory/shortTerm").saveSession(args.sessionId, session);
-
-        // If there was an error in execution (e.g. terminal command failed), we should break the loop and let LangGraph repair
-        if (
-          execRes.stderr &&
-          execRes.stderr.trim().length > 0 &&
-          !execRes.stdout
-        ) {
-          initialContext.errors.push(`Step ${i + 1} failed: ${execRes.stderr}`);
-          break;
+    const runtime = new TaskExecutionRuntime(
+      args,
+      // onProgress → broadcast EXECUTION_PROGRESS to the UI via onState
+      (progressEvent) => {
+        if (args.onState) {
+          args.onState({
+            type: "EXECUTION_PROGRESS",
+            ...progressEvent,
+          });
         }
-      } catch (err) {
-        const errObs = `system: [ERROR] Step ${i + 1}/${loadedPlanSteps.length} failed to execute. Error: ${err.message}`;
-        initialContext.recentMessages.push(errObs);
-        initialContext.errors.push(`Step ${i + 1} failed: ${err.message}`);
-        session.messages.push({ role: "system", content: errObs });
-        require("../memory/shortTerm").saveSession(args.sessionId, session);
-        break; // Stop executing remaining steps
-      }
+        // Also log significant events to the session's episodic memory
+        if (
+          progressEvent.event === "STEP_DONE" ||
+          progressEvent.event === "STEP_RETRY" ||
+          progressEvent.event === "RUNTIME_ESCALATE"
+        ) {
+          const obs = `system: [RUNTIME] ${progressEvent.event} — step ${(progressEvent.stepIndex ?? 0) + 1}: ${progressEvent.stepAction || ""}`;
+          initialContext.recentMessages.push(obs);
+          session.messages.push({ role: "system", content: obs });
+          require("../memory/shortTerm").saveSession(args.sessionId, session);
+        }
+      },
+    );
+
+    // Expose pause/resume/abort on args so the extension can call them
+    args._runtime = runtime;
+
+    const runtimeResult = await runtime.execute(loadedPlanSteps);
+
+    if (!runtimeResult.success) {
+      const errMsg = `Runtime stopped at step ${(runtimeResult.completedSteps || 0) + 1}: ${runtimeResult.error || "Unknown error"}`;
+      initialContext.errors.push(errMsg);
+      const failObs = `system: [RUNTIME_FAILURE] ${errMsg}`;
+      initialContext.recentMessages.push(failObs);
+      session.messages.push({ role: "system", content: failObs });
+      require("../memory/shortTerm").saveSession(args.sessionId, session);
+    } else {
+      const doneObs = `system: [RUNTIME_COMPLETE] All ${runtimeResult.completedSteps} steps completed successfully.`;
+      initialContext.recentMessages.push(doneObs);
+      session.messages.push({ role: "system", content: doneObs });
+      require("../memory/shortTerm").saveSession(args.sessionId, session);
     }
   }
+  // ──────────────────────────────────────────────────────────────────────────
 
   // ─── LangGraph Nodes ────────────────────────────────────────────────────────
   async function planNode(state) {
@@ -285,7 +364,15 @@ async function runAgentLoop(goal, args) {
 
     let action;
     try {
+      // Refresh workspace files so planner doesn't hallucinate missing items after edits
+      if (state.args.workspaceRoot) {
+        state.args.workspaceFiles = require("../tools/fileSystem").listWorkspaceFiles();
+      }
+      
       action = await runPlanner(state, state.args);
+      console.log("\n=========================");
+      console.log("[DEBUG] PLAN:", JSON.stringify(action, null, 2));
+      console.log("=========================\n");
     } catch (err) {
       console.error("[Agent OS] Planner error:", err);
       if (state.args.onChunk)
@@ -307,7 +394,9 @@ async function runAgentLoop(goal, args) {
 
     if (
       !action ||
-      (!action.tool && (!action.steps || action.steps.length === 0))
+      (!action.tool &&
+        (!action.executionPlan || action.executionPlan.length === 0) &&
+        (!action.steps || action.steps.length === 0))
     ) {
       return { status: "FAILED", attempts };
     }
@@ -340,7 +429,7 @@ async function runAgentLoop(goal, args) {
           activeTool: "Planner",
           executionStatus: "PLANNING",
           totalSteps: state.taskMemory.pending?.length || 1,
-          budget: state.executionBudget
+          budget: state.executionBudget,
         });
       }
     }
@@ -377,7 +466,7 @@ async function runAgentLoop(goal, args) {
       }
     }
 
-    const steps = action.steps || [];
+    const steps = action.executionPlan || action.steps || [];
     if (steps.length === 0) {
       if (action.tool) steps.push(action);
     }
@@ -423,7 +512,7 @@ async function runAgentLoop(goal, args) {
     }
 
     // High-risk tools require user approval
-    const highRisk = ["fs.writeFile", "fs.editFile", "shell.exec"];
+    const highRisk = ["fs.writeFile", "fs.editFile", "terminal.exec"];
     const hasHighRisk = steps.some((s) => highRisk.includes(s.tool));
 
     if (hasHighRisk) {
@@ -442,23 +531,37 @@ async function runAgentLoop(goal, args) {
         });
 
         if (isBigPlan) {
+          let mdContent = `### Implementation Plan (${steps.length} steps)\n\n`;
+          if (action.goal) mdContent += `**Goal:** ${action.goal}\n\n`;
+          if (action.thought) mdContent += `**Thought:** ${action.thought}\n\n`;
+          
+          mdContent += `#### Execution Steps:\n`;
+          steps.forEach((s, i) => {
+            mdContent += `${i + 1}. **[${s.phase || "Execute"}]** \`${s.tool}\`\n`;
+            if (s.input) {
+               const inputStr = JSON.stringify(s.input, null, 2);
+               mdContent += `   \`\`\`json\n   ${inputStr.replace(/\n/g, '\n   ')}\n   \`\`\`\n`;
+            }
+          });
+
           sess.messages.push({
             role: "assistant",
-            content: `Proposed implementation plan with ${steps.length} steps.`,
+            content: mdContent,
             isPlan: true,
             planData: steps,
             planStatus: "pending",
           });
         } else {
           const s = steps[0];
-          if (s.tool === "shell.exec") {
+          if (s.tool === "terminal.exec") {
+            const cmdString = s.input.cmd + (s.input.args && s.input.args.length > 0 ? " " + s.input.args.join(" ") : "");
             sess.messages.push({
               role: "assistant",
-              content: `Proposed command: ${s.input.command}`,
+              content: `Proposed command: ${cmdString}`,
               isPlan: false,
               suggestedCommands: [
                 {
-                  command: s.input.command,
+                  command: cmdString,
                   status: "pending",
                 },
               ],
@@ -503,7 +606,16 @@ async function runAgentLoop(goal, args) {
                 {
                   filePath: s.input.path,
                   newCode: newCode,
-                  originalCode: null,
+                  // Read current file content so the diff left-panel shows what exists on disk.
+                  // For brand-new files this returns "" (empty left panel is correct).
+                  originalCode: (() => {
+                    try {
+                      const _fs = require("fs");
+                      const _path = require("path");
+                      const _fp = _path.resolve(state.args.workspaceRoot, s.input.path);
+                      return _fs.existsSync(_fp) ? _fs.readFileSync(_fp, "utf-8") : "";
+                    } catch { return ""; }
+                  })(),
                   isNew: s.tool === "fs.writeFile",
                   status: "pending",
                 },
@@ -535,18 +647,54 @@ async function runAgentLoop(goal, args) {
     }
 
     const stepAction =
-      action.steps && action.steps.length > 0 ? action.steps[0] : action;
+      action.executionPlan && action.executionPlan.length > 0
+        ? action.executionPlan[0]
+        : action.steps && action.steps.length > 0
+          ? action.steps[0]
+          : action;
     return { action: stepAction, attempts, actionHistory: state.actionHistory };
   }
 
   async function executeNode(state) {
+    console.log("\n=========================");
+    console.log("[DEBUG] EXECUTOR START");
+    console.log(
+      "[DEBUG] EXECUTOR STATE:",
+      JSON.stringify(state.action, null, 2),
+    );
+    console.log("=========================\n");
+
     let sess = require("../memory/shortTerm").getSession(state.args.sessionId);
     if (sess) {
       sess.agentStatus = "🔵 Executing";
       require("../memory/shortTerm").saveSession(state.args.sessionId, sess);
     }
 
+    // ─── Phase 2: Resource Lock Acquisition ─────────────────────────────────
+    const writingTools = ["fs.writeFile", "fs.editFile", "fs.deleteFile"];
+    const tool = state.action?.tool;
+    const filePath = state.action?.input?.path;
+    const activeGoalId = state.goalId || "default";
+
+    if (writingTools.includes(tool) && filePath) {
+      try {
+        await lockManager.acquireLock(filePath, activeGoalId, "write");
+      } catch (lockErr) {
+        console.warn(`[LockManager] ${lockErr.message}`);
+        return {
+          status: "REPLAN_NEEDED",
+          recentMessages: [
+            ...(state.recentMessages || []),
+            `system: [LOCK_CONFLICT] Cannot write to '${filePath}' — another goal holds the write lock. Replanning required.`,
+          ],
+          lastResult: { success: false, stderr: lockErr.message },
+        };
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // --- Phase Lock Validator ---
+    console.log(state.action.phase);
     const stepPhase = state.action.phase;
     let newPhase = state.currentPhase;
     if (!state.currentPhase && stepPhase) {
@@ -584,7 +732,7 @@ async function runAgentLoop(goal, args) {
         state.args.onStatus(`${t}[EDITING]${targetPath}`);
       else if (tool === "grep_search")
         state.args.onStatus(`${t}[SCANNING] Codebase...`);
-      else if (tool === "shell.exec")
+      else if (tool === "terminal.exec")
         state.args.onStatus(`${t}[EXECUTING] Terminal Command`);
       else if (tool === "list_dir")
         state.args.onStatus(`${t}[LISTING] Directory`);
@@ -598,11 +746,73 @@ async function runAgentLoop(goal, args) {
         activeTool: state.action.tool,
         executionStatus: "RUNNING",
         totalSteps: state.taskMemory?.pending?.length || 1,
-        budget: state.executionBudget
+        budget: state.executionBudget,
       });
     }
 
-    const execRes = await runExecutor(state.action, state, state.args);
+    // ─── Phase 6: Long-running Process Detection ──────────────────────────────
+    const longRunningPatterns = [
+      /npm run (dev|start|serve)/,
+      /node server/,
+      /nodemon/,
+    ];
+    const isLongRunning =
+      tool === "terminal.exec" &&
+      longRunningPatterns.some((p) =>
+        p.test(
+          (
+            state.action.input?.cmd ||
+            ""
+          ).toLowerCase(),
+        ),
+      );
+
+    let execRes;
+    let startedProcessId = null;
+
+    if (isLongRunning) {
+      const cmd = state.action.input?.cmd || "node";
+      const cmdArgs = state.action.input?.args || [
+        state.action.input?.command || "",
+      ];
+      const procInfo = globalProcessManager.startProcess(
+        cmd,
+        cmdArgs,
+        {},
+        state.args?.workspaceRoot,
+      );
+      startedProcessId = procInfo.id;
+      // Give the process 1.5 seconds to boot or crash, then sample logs
+      await new Promise((r) => setTimeout(r, 1500));
+      const bootLogs = globalProcessManager.getLogs(procInfo.id).slice(0, 1000);
+      execRes = {
+        success: true,
+        stdout: `[ProcessManager] Process started: ${procInfo.id}\n${bootLogs}`,
+        stderr: "",
+        processId: procInfo.id,
+      };
+    } else {
+      execRes = await runExecutor(state.action, state, state.args);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ─── Phase 2: Release Lock after execution ────────────────────────────────
+    if (writingTools.includes(tool) && filePath) {
+      lockManager.releaseLock(filePath, activeGoalId);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ─── Phase 5: Update WorldModel causal graph ──────────────────────────────
+    if (execRes.success !== false && filePath) {
+      state.worldModel.recordChange(
+        filePath,
+        tool,
+        tool,
+        execRes.success ? "success" : "failed",
+      );
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const observation = `system: [TOOL_RESULT] ${state.action.tool}\nResult:\n${execRes.stdout || execRes.stderr}`;
 
     if (state.args.onState) {
@@ -613,7 +823,7 @@ async function runAgentLoop(goal, args) {
         executionStatus: execRes.success !== false ? "SUCCESS" : "FAILED",
         totalSteps: state.taskMemory?.pending?.length || 1,
         budget: state.executionBudget,
-        lastResult: execRes.stdout || execRes.stderr
+        lastResult: execRes.stdout || execRes.stderr,
       });
     }
 
@@ -655,6 +865,7 @@ async function runAgentLoop(goal, args) {
       recentMessages: newMessages,
       failureMemory: state.failureMemory,
       lastResult: execRes,
+      structuredObservation: { processStarted: startedProcessId },
     };
   }
 
@@ -829,14 +1040,151 @@ async function runAgentLoop(goal, args) {
   }
 
   // ─── Compile and Invoke Graph ─────────────────────────────────────────────
+  // ─── Compile and Invoke Graph ─────────────────────────────────────────────
+
+  // Wrapper functions to adapt new node signatures if needed
+  async function workspaceNode(state) {
+    const res = await runWorkspaceGraph(state, initialContext.args);
+    return { workspaceGraph: res.workspaceGraph };
+  }
+
+  // ─── Phase 4: Reconciliation Node ────────────────────────────────────────
+  async function reconciliationNode(state) {
+    if (state.workspaceGraph) {
+      reconciler.reconcile(state.workspaceGraph, goalManager.getNextGoal());
+    }
+    return {}; // no state mutation needed — memoryManager is the output
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async function capabilityNode(state) {
+    const res = await runToolCapability(state, initialContext.args);
+    return { toolCapabilities: res.toolCapabilities };
+  }
+
+  async function validationNode(state) {
+    const res = await runValidator(state, initialContext.args);
+    if (res.status === "INVALID_PLAN") {
+      return {
+        status: "VALIDATION_FAILED",
+        structuredObservation: res.structuredObservation,
+        lastResult: res.lastResult,
+      };
+    }
+    return {}; // Preserve state.status set by planNode (e.g. AWAITING_APPROVAL or autonomous)
+  }
+
+  async function observationNode(state) {
+    const res = await runObservation(state, initialContext.args);
+    return { structuredObservation: res.observation };
+  }
+
+  async function reflectionNode(state) {
+    const res = await runReflection(state, initialContext.args);
+
+    // ─── Phase 3: Persist beliefs from successful execution ───────────────
+    const obs = state.structuredObservation || {};
+    if (obs.success !== false) {
+      const act = state.action || {};
+      if (act.input?.path) {
+        memoryManager.updateBelief(
+          `last_${act.tool}`,
+          act.input.path,
+          0.95,
+          "execution_result",
+        );
+      }
+      if (
+        act.tool === "shell.exec" &&
+        (act.input?.command || "").includes("npm install")
+      ) {
+        memoryManager.updateBelief(
+          "packages_installed",
+          true,
+          0.9,
+          "execution_result",
+        );
+      }
+    } else if (obs.success === false) {
+      // Emit failure event so MemoryManager passively records it
+      eventBus.emitEvent(EVENTS.FAILURE_RECORDED, {
+        failure: { tool: state.action?.tool, stderr: obs.stderr },
+      });
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    return { reflection: res.reflection, status: res.status };
+  }
+
+  async function evaluatorNode(state) {
+    const res = await runGoalEvaluator(state, initialContext.args);
+    return { evaluation: res.evaluation };
+  }
+
+  async function decisionNode(state) {
+    const res = await runReplanDecision(state, initialContext.args);
+
+    // ─── Phase 1: Close Goal when finished ───────────────────────────────
+    if ((res.status === "DONE" || res.status === "ASK_USER") && state.goalId) {
+      const finalStatus = res.status === "DONE" ? "completed" : "paused";
+      goalManager.updateGoalStatus(state.goalId, finalStatus);
+      lockManager.releaseLocksForGoal(state.goalId);
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    return { status: res.status };
+  }
+
+  // Define LangGraph conditional routers
+  function routeAfterValidation(state) {
+    if (state.status === "VALIDATION_FAILED") {
+      return "reflectionNode"; // Skip execution, go straight to reflection
+    }
+    if (
+      state.status === "AWAITING_APPROVAL" ||
+      state.status === "DONE" ||
+      state.status === "FAILED"
+    ) {
+      return END;
+    }
+    return "executeNode"; // Proceed to execution automatically
+  }
+
+  function routeAfterDecision(state) {
+    if (state.status === "DONE" || state.status === "ASK_USER") return END;
+    if (state.status === "EXECUTE") return "executeNode";
+    if (state.status === "PLAN") return "planNode";
+    return END;
+  }
+
+  // Construct Jarvix 4.0 Agent Loop
   const workflow = new StateGraph(AgentState)
+    .addNode("workspaceNode", workspaceNode)
+    .addNode("reconciliationNode", reconciliationNode) // Phase 4
+    .addNode("capabilityNode", capabilityNode)
     .addNode("planNode", planNode)
+    .addNode("validationNode", validationNode)
+    // "Approval" happens implicitly when we break loop and wait for UI
     .addNode("executeNode", executeNode)
-    .addNode("validateAndReflectNode", validateAndReflectNode)
-    .addEdge(START, "planNode")
-    .addConditionalEdges("planNode", shouldContinue)
-    .addEdge("executeNode", "validateAndReflectNode")
-    .addEdge("validateAndReflectNode", "planNode");
+    .addNode("observationNode", observationNode)
+    .addNode("reflectionNode", reflectionNode)
+    .addNode("evaluatorNode", evaluatorNode)
+    .addNode("decisionNode", decisionNode)
+
+    // Edges (Phase 4: reconciliation inserted between workspace and capability)
+    .addEdge(START, "workspaceNode")
+    .addEdge("workspaceNode", "reconciliationNode")
+    .addEdge("reconciliationNode", "capabilityNode")
+    .addEdge("capabilityNode", "planNode")
+    .addEdge("planNode", "validationNode")
+    .addConditionalEdges("validationNode", routeAfterValidation)
+
+    // Executor Path (starts from Approval Resumption)
+    .addEdge("executeNode", "observationNode")
+    .addEdge("observationNode", "reflectionNode")
+    .addEdge("reflectionNode", "evaluatorNode")
+    .addEdge("evaluatorNode", "decisionNode")
+    .addConditionalEdges("decisionNode", routeAfterDecision);
 
   const app = workflow.compile();
 
@@ -860,6 +1208,22 @@ async function runAgentLoop(goal, args) {
     finalStatus = "FAILED";
   }
 
+  // ─── Fix 1: Persist WorldModel causal graph back to session ─────────────────
+  // The DeepWorldModel instance lives inside finalState.worldModel.
+  // We serialize it and store it on the session so it survives across loop calls.
+  if (
+    finalState.worldModel &&
+    typeof finalState.worldModel.serialize === "function"
+  ) {
+    const shortTerm = require("../memory/shortTerm");
+    const sess = shortTerm.getSession(args.sessionId);
+    if (sess) {
+      sess.worldModelData = finalState.worldModel.serialize();
+      shortTerm.saveSession(args.sessionId, sess);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   return { status: finalStatus, context: finalState };
 }
 
@@ -869,6 +1233,10 @@ async function askAgent(args) {
 
   const shortTerm = require("../memory/shortTerm");
   let session = shortTerm.getSession(sessionId);
+
+  // ─── Phase 7: Start snapshot scheduler once ───────────────────────────────
+  _startSnapshotScheduler();
+  // ─────────────────────────────────────────────────────────────────────────
 
   if (!session) {
     session = {
@@ -934,6 +1302,23 @@ async function askAgent(args) {
         onStatus(
           `[${new Date().toLocaleTimeString()}] 🧭 Intent: ${classification.intent} (Mode: ${classification.execution_mode.toUpperCase()})`,
         );
+
+      // ─── Phase 1: Register Goal with GoalManager ──────────────────────────
+      if (
+        classification.execution_mode !== "chat" &&
+        classification.execution_mode !== "qa"
+      ) {
+        const trackedGoal = goalManager.createGoal({
+          title: question.slice(0, 120),
+          priority: classification.risk_level === "high" ? "high" : "normal",
+        });
+        session.goalId = trackedGoal.id;
+        if (onStatus)
+          onStatus(
+            `[${new Date().toLocaleTimeString()}] 🎯 Goal registered: ${trackedGoal.id}`,
+          );
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       const prevGoal = session.taskMemory?.goal || "";
       goalData = await normalizeGoal(
@@ -1013,7 +1398,81 @@ async function askAgent(args) {
 
   let result;
 
-  if (
+  // ─── Fix 2: GOAL_MANAGEMENT dedicated handler ──────────────────────────────
+  // Instead of falling through to code execution, resolve goal-management
+  // commands (cancel, resume, prioritize) directly against the GoalManager.
+  if (classification && classification.intent === "GOAL_MANAGEMENT") {
+    const questionLower = question.toLowerCase();
+    let gmResponse = "";
+
+    if (/^(cancel|stop|abort|forget)/.test(questionLower)) {
+      // Cancel the most recent active goal
+      const activeGoal = goalManager.getNextGoal();
+      if (activeGoal) {
+        goalManager.cancelGoalTree(activeGoal.id);
+        lockManager.releaseLocksForGoal(activeGoal.id);
+        gmResponse = `✅ **Goal cancelled:** "${activeGoal.title}"\n\nAll sub-goals and resource locks have been released. What would you like to do next?`;
+      } else {
+        gmResponse =
+          "ℹ️ No active goal to cancel. The queue is currently empty.";
+      }
+    } else if (/^(resume|continue|unpause)/.test(questionLower)) {
+      // Re-activate the most recently paused goal
+      let resumedGoal = null;
+      for (const [, g] of goalManager.goals.entries()) {
+        if (g.status === "paused") {
+          resumedGoal = g;
+          break;
+        }
+      }
+      if (resumedGoal) {
+        goalManager.updateGoalStatus(resumedGoal.id, "active");
+        gmResponse = `▶️ **Goal resumed:** "${resumedGoal.title}"\n\nResuming execution — send your next instruction to continue.`;
+      } else {
+        gmResponse = "ℹ️ No paused goal found to resume.";
+      }
+    } else if (
+      /^(status|what.*goals|show.*goals|list.*goals)/.test(questionLower)
+    ) {
+      // Summarize goal queue state
+      const active = goalManager.activeQueue.map((id) =>
+        goalManager.getGoal(id),
+      );
+      const blocked = goalManager.blockedQueue.map((id) =>
+        goalManager.getGoal(id),
+      );
+      const lines = [];
+      if (active.length > 0) {
+        lines.push("**Active Goals:**");
+        active.forEach((g) =>
+          lines.push(`  - [${g.priority.toUpperCase()}] ${g.title}`),
+        );
+      }
+      if (blocked.length > 0) {
+        lines.push("**Blocked Goals:**");
+        blocked.forEach((g) =>
+          lines.push(`  - ${g.title} (waiting on dependencies)`),
+        );
+      }
+      gmResponse =
+        lines.length > 0
+          ? lines.join("\n")
+          : "ℹ️ No goals are currently tracked.";
+    } else {
+      // Fallback: route unknown goal-management to agent loop for LLM interpretation
+      session.agentStatus = "🔵 Executing";
+      result = await runAgentLoop(question, loopArgs);
+      session.agentStatus = result.status === "FAILED" ? "🔴 Error" : "🟢 Idle";
+      gmResponse = null;
+    }
+
+    if (gmResponse !== null) {
+      patchedOnChunk(gmResponse);
+      result = { status: "DONE", context: null };
+      session.agentStatus = "🟢 Idle";
+    }
+  } else if (
+    // ─────────────────────────────────────────────────────────────────────────
     classification &&
     (classification.execution_mode === "chat" ||
       classification.execution_mode === "qa")
@@ -1037,20 +1496,47 @@ async function askAgent(args) {
           ? `\n\nUser Profile & Facts:\n${JSON.stringify(userProfile, null, 2)}`
           : "";
 
+      // ── Intent-aware context & system prompt ──────────────────────────────
+      const isChatIntent =
+        classification.intent === "CHAT" ||
+        (classification.execution_mode === "chat" && classification.complexity < 25);
+      const isStrict = classification.intent === "FACT_SHORT";
+
+      // For pure chat ("nice", "thanks", "ok"), send only the last 3 messages
+      // and NO workspace file context so the LLM doesn't pivot to unsolicited tech topics.
+      const chatHistoryCtx = isChatIntent
+        ? session.messages
+            .slice(-3)
+            .map((m) => `${m.role}: ${(m.content || "").toString().slice(0, 200)}`)
+            .join("\n")
+        : historyCtx;
+
       const messages = [
         {
           role: "user",
-          content: `Context:\n${historyCtx}${profileCtx}\n\nQuestion:\n${question}`,
+          content: `Context:\n${chatHistoryCtx}${profileCtx}\n\nQuestion:\n${question}`,
         },
       ];
 
-      const isStrict = classification.intent === "FACT_SHORT";
-      let systemPrompt =
-        "You are Jarvix, an advanced AI programming assistant. Provide a helpful, clear, and concise answer to the user's question. Focus on deep technical accuracy.";
-      if (isStrict) {
+      let systemPrompt;
+      if (isChatIntent) {
+        systemPrompt =
+          "You are Jarvix, a friendly AI assistant. " +
+          "The user just said something casual or social. " +
+          "Reply naturally and briefly — 1-2 sentences max. " +
+          "Do NOT volunteer technical information, suggestions, or tutorials unless directly asked. " +
+          "Match the energy: if they said 'nice', say something warm and short.";
+      } else if (isStrict) {
         systemPrompt =
           'SYSTEM: Return ONLY the exact answer. No explanation. No punctuation unless required. No extra words. If you are not 100% sure, say "unknown". Do NOT guess dates, facts, or numbers.';
+      } else {
+        systemPrompt =
+          "You are Jarvix, an advanced AI programming assistant running inside a VS Code Extension host. " +
+          "The active codebase is built using Node.js and JavaScript. " +
+          "Provide a helpful, clear, and concise answer to the user's question. " +
+          "Focus on deep technical accuracy, and prefer suggesting Node.js, JavaScript, or VS Code Extension API solutions unless the user explicitly requests another language.";
       }
+
 
       let rawDraft = "";
       await callLLM({
@@ -1063,7 +1549,10 @@ async function askAgent(args) {
         },
       });
 
-      if (isStrict) {
+      if (isChatIntent) {
+        // Pure chat, skip fact-checking to avoid technical reviews of casual talk
+        patchedOnChunk(rawDraft.trim());
+      } else if (isStrict) {
         // Validation Layer
         let finalOutput = rawDraft.trim();
         if (
@@ -1086,11 +1575,11 @@ async function askAgent(args) {
           messages: [
             {
               role: "user",
-              content: `Review this technical answer for factual accuracy. If it is 100% correct, output it exactly. If there are any misleading explanations, correct them seamlessly before outputting. Do not add metadata, just output the final text.\n\nDraft Answer:\n${rawDraft}`,
+              content: `Review this technical answer for factual accuracy. If it is 100% correct, output it exactly. If there are any misleading explanations, correct them seamlessly before outputting. Do NOT add any preamble, introduction, or review notes (e.g. do not say "Here's the corrected version"). Output ONLY the final response text.\n\nDraft Answer:\n${rawDraft}`,
             },
           ],
           system:
-            "You are a senior technical reviewer. Output only the final corrected response. DO NOT wrap the output in a markdown code block.",
+            "You are a senior technical reviewer. Output ONLY the final corrected response itself. Do NOT include any meta-commentary, introductory notes, or preambles. Do NOT wrap the output in a markdown code block.",
           model: args.model,
           provider: args.provider,
           onChunk: (c) => {
@@ -1132,22 +1621,34 @@ async function askAgent(args) {
 
   const updatedSession = shortTerm.getSession(sessionId);
   if (updatedSession) {
-    // Find the last assistant message, as system messages might have been appended during the loop
-    const lastAssistantMsg = [...updatedSession.messages]
-      .reverse()
-      .find((m) => m.role === "assistant");
+    // Find the message that was originally marked as streaming (the placeholder)
+    const streamingMsgIndex = updatedSession.messages.findLastIndex(
+      (m) => m.role === "assistant" && m.streaming
+    );
 
-    if (lastAssistantMsg) {
+    if (streamingMsgIndex !== -1) {
       let finalContent = fullResponse;
-      // We removed <jarvix-plan> from streaming, but if any was leftover, remove it.
       if (finalContent.includes("<jarvix-plan>")) {
         finalContent = finalContent
           .replace(/<jarvix-plan>[\s\S]*?<\/jarvix-plan>/, "")
           .trim();
       }
-      lastAssistantMsg.content = finalContent;
-      lastAssistantMsg.streaming = false;
+      
+      const streamingMsg = updatedSession.messages[streamingMsgIndex];
+      streamingMsg.content = finalContent;
+      streamingMsg.streaming = false;
+
+      // If the message is completely empty and isn't a plan/tool, remove it
+      if (!streamingMsg.content.trim() && !streamingMsg.isPlan && !streamingMsg.fileEdits && !streamingMsg.suggestedCommands) {
+        updatedSession.messages.splice(streamingMsgIndex, 1);
+      }
     }
+    
+    // Safety check: ensure no message is left stuck in streaming state
+    updatedSession.messages.forEach(m => {
+       if (m.role === "assistant") m.streaming = false;
+    });
+
     shortTerm.saveSession(sessionId, updatedSession);
   }
 

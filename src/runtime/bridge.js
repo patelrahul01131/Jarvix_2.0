@@ -1,6 +1,13 @@
 const axios = require("axios");
 
-async function streamChatCompletion(req, res, messages, system, selectedModel, selectedProvider) {
+async function streamChatCompletion(
+  req,
+  res,
+  messages,
+  system,
+  selectedModel,
+  selectedProvider,
+) {
   // System prompt injection
   const fullSystemPrompt =
     system +
@@ -14,9 +21,13 @@ Be highly efficient, direct, and concise. Avoid conversational fluff unless nece
 
   switch (selectedProvider) {
     case "gemini":
-      url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-      const geminiKey = (process.env.GEMINI_API_KEY || "").replace(/["']/g, "").trim();
-      if (!geminiKey) throw new Error("GEMINI_API_KEY is missing or empty in .env");
+      url =
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+      const geminiKey = (process.env.GEMINI_API_KEY || "")
+        .replace(/["']/g, "")
+        .trim();
+      if (!geminiKey)
+        throw new Error("GEMINI_API_KEY is missing or empty in .env");
       headers["Authorization"] = `Bearer ${geminiKey}`;
       break;
     case "chatgpt":
@@ -53,7 +64,8 @@ Be highly efficient, direct, and concise. Avoid conversational fluff unless nece
       headers["Authorization"] = `Bearer ${process.env.MISTRAL_API_KEY}`;
       break;
     default:
-      url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+      url =
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
       headers["Authorization"] = `Bearer ${process.env.GEMINI_API_KEY}`;
       break;
   }
@@ -85,7 +97,9 @@ Be highly efficient, direct, and concise. Avoid conversational fluff unless nece
     };
   }
 
-  console.log(`[Jarvix OS] Requesting provider=${selectedProvider} model=${selectedModel}`);
+  console.log(
+    `[Jarvix OS] Requesting provider=${selectedProvider} model=${selectedModel}`,
+  );
 
   const abortController = new AbortController();
   req.on("close", () => {
@@ -115,7 +129,9 @@ Be highly efficient, direct, and concise. Avoid conversational fluff unless nece
         .status(err.response.status || 500)
         .json({ error: `AI Provider Error: ${err.message}` });
     }
-    throw new Error(`AI Provider connection failed: ${err.message}. Network issue or timeout.`);
+    throw new Error(
+      `AI Provider connection failed: ${err.message}. Network issue or timeout.`,
+    );
   }
 
   res.setHeader("Content-Type", "text/event-stream");

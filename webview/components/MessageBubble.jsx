@@ -5,6 +5,7 @@ import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github-dark.css';
 import FileDiffViewer from './FileDiffViewer';
 import CommandPermissionViewer from './CommandPermissionViewer';
+import { useStore } from '../store';
 
 // ─── Custom code block renderer ────────────────────────────────────────────────
 function CodeBlock({ children, className }) {
@@ -169,9 +170,9 @@ function parseStructuredAgentContent(content) {
     const parsed = JSON.parse(fixedJson);
     return parsed.ui || null;
   } catch (e) {
-    // Streaming fallback: simple regex extraction for UI part
+    // Streaming fallback: robust regex extraction that doesn't require closing quotes
     const extractUiStr = (key) => {
-      const match = content.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`, 'i'));
+      const match = content.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)`, 'i'));
       return match ? match[1] : null;
     };
     
@@ -217,24 +218,15 @@ export default function MessageBubble({
   message,
   messageIndex,
   isLastAssistant,
-  onApplyCode,
-  onAcceptFile,
-  onDeclineFile,
-  onAcceptAllFiles,
-  onDeclineAllFiles,
-  onAcceptCommand,
-  onDeclineCommand,
-  onApprovePlan,
-  onEdit,
-  onRegenerate,
-  onViewDiff,
 }) {
+  const store = useStore();
   const [editMode, setEditMode] = useState(false);
   const [editText, setEditText] = useState(message.content || '');
   const [copied, setCopied] = useState(false);
 
   const isUser      = message.role === 'user';
   const isAssistant = message.role === 'assistant';
+  const isSystem    = message.role === 'system';
   const isError     = message.isError;
   const isStreaming = message.streaming;
 
@@ -246,8 +238,8 @@ export default function MessageBubble({
   }, [message.content]);
 
   function handleSaveEdit() {
-    if (editText.trim() && onEdit) {
-      onEdit(messageIndex, editText.trim());
+    if (editText.trim() && store.handleEditAndResend) {
+      store.handleEditAndResend(messageIndex, editText.trim());
     }
     setEditMode(false);
   }
@@ -263,31 +255,74 @@ export default function MessageBubble({
 
   const structuredData = isAssistant ? parseStructuredAgentContent(message.content) : null;
 
-  return (
-    <div className={`message ${message.role} ${isError ? 'error-bubble' : ''}`}>
-      {/* Header */}
-      <div className="message-header">
-        <div className="message-role-group">
-          <div className="message-avatar">
-            {isUser ? 'U' : 'J'}
-          </div>
-          <span className="message-role">{isUser ? 'You' : 'Jarvix'}</span>
-          {modelBadge && isAssistant && (
-            <span className="message-model-badge">{modelBadge}</span>
-          )}
-          {isStreaming && (
-            <span style={{ fontSize: '10px', color: 'var(--accent)', fontStyle: 'italic' }}>
-              ● streaming
-            </span>
-          )}
+  function renderToolCard(content) {
+    if (!content) return null;
+    const lines = content.split('\n');
+    const titleLine = lines[0]; 
+    
+    if (content.includes('[TOOL VERIFICATION]')) {
+      return (
+        <div className="tool-card verification">
+          <div className="tool-card-icon">🛡️</div>
+          <div className="tool-card-title">{content.replace('[TOOL VERIFICATION]', '').trim()}</div>
         </div>
+      );
+    }
+
+    const commandLine = lines.find(l => l.startsWith('Command:')) || '';
+    const resultIdx = lines.findIndex(l => l.startsWith('Result:') || l.startsWith('Initial Logs:'));
+    const logs = resultIdx !== -1 ? lines.slice(resultIdx + 1).join('\n') : '';
+    const isFail = content.includes('Exit Code') && !content.includes('Exit Code 0');
+
+    return (
+      <div className={`tool-card ${isFail ? 'fail' : ''}`}>
+        <div className="tool-card-header">
+          <span className="tool-card-icon">⚙️</span>
+          <span className="tool-card-title">
+            {commandLine ? commandLine.replace('Command: ', '') : titleLine.replace('[TOOL_RESULT]', '').trim()}
+          </span>
+          {isFail && <span className="tool-card-badge fail">Failed</span>}
+        </div>
+        {logs && (
+          <div className="tool-card-logs">
+            <CodeBlock className="language-sh">{logs}</CodeBlock>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`message timeline-event ${message.role} ${isError ? 'error-bubble' : ''}`}>
+      {/* Timeline Track */}
+      <div className="timeline-track">
+        <div className={`timeline-node ${message.role}`}>
+          {isUser ? 'U' : isSystem ? '⚙️' : 'J'}
+        </div>
+        <div className="timeline-line" />
+      </div>
+
+      <div className="timeline-content-wrapper">
+        {/* Header */}
+        <div className="message-header">
+          <div className="message-role-group">
+            <span className="message-role">{isUser ? 'You' : isSystem ? 'System' : 'Jarvix'}</span>
+            {modelBadge && isAssistant && (
+              <span className="message-model-badge">{modelBadge}</span>
+            )}
+            {isStreaming && (
+              <span style={{ fontSize: '10px', color: 'var(--accent)', fontStyle: 'italic' }}>
+                ● streaming
+              </span>
+            )}
+          </div>
 
         {/* Action buttons */}
         <div className="message-actions">
           <button className="msg-action-btn" onClick={handleCopy} title="Copy message">
             {copied ? '✓' : '⎘ Copy'}
           </button>
-          {isUser && onEdit && (
+          {isUser && store.handleEditAndResend && (
             <button
               className="msg-action-btn"
               onClick={() => { setEditText(displayContent); setEditMode(true); }}
@@ -296,10 +331,10 @@ export default function MessageBubble({
               ✏️ Edit
             </button>
           )}
-          {isLastAssistant && !isStreaming && onRegenerate && (
+          {isLastAssistant && !isStreaming && store.handleRegenerate && (
             <button
               className="msg-action-btn"
-              onClick={() => onRegenerate(messageIndex)}
+              onClick={() => store.handleRegenerate(messageIndex)}
               title="Regenerate response"
             >
               ↺ Retry
@@ -328,45 +363,19 @@ export default function MessageBubble({
             </div>
           </>
         ) : message.isPlan ? (
-          /* Plan view */
-          <div className="implementation-plan-container">
-            <div className="plan-header">
-              <div className="plan-title">📋 Implementation Plan</div>
-              {message.planStatus === 'approved'
-                ? <span className="plan-status-approved">✅ Approved</span>
-                : <span className="plan-status-pending">⏳ Awaiting Review</span>
-              }
+          /* Plan view Card */
+          <div className="artifact-card" onClick={() => store.setActiveWorkspaceView({ type: 'plan', messageIndex })}>
+            <div className="artifact-icon">📋</div>
+            <div className="artifact-info">
+              <div className="artifact-title">Implementation Plan</div>
+              <div className="artifact-status" style={{ color: message.planStatus === 'approved' ? 'var(--success)' : 'var(--warning)' }}>
+                {message.planStatus === 'approved' ? 'Approved' : 'Awaiting Review'}
+              </div>
             </div>
-
-            {message.planData && Array.isArray(message.planData) && message.planData.length > 0 && (
-              <div className="plan-steps-list" style={{ padding: '12px 0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {message.planData.map((step, idx) => (
-                  <div key={idx} style={{ display: 'flex', gap: '8px', fontSize: '13px' }}>
-                    <span style={{ color: 'var(--accent)' }}>{idx + 1}.</span>
-                    <span>{step.action}</span>
-                    <span style={{ color: 'var(--text-muted)', fontSize: '11px', background: 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px' }}>
-                      {step.tool}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-            <MarkdownRenderer content={message.content} />
-
-            {message.planStatus !== 'approved' && onApprovePlan && (
-              <div style={{ marginTop: '14px', borderTop: '1px solid rgba(124,106,247,0.15)', paddingTop: '12px' }}>
-                <button
-                  className="plan-approve-btn"
-                  onClick={() => onApprovePlan(messageIndex)}
-                >
-                  🚀 Approve & Execute Plan
-                </button>
-                <div className="plan-approve-hint">
-                  Or type feedback below to refine the plan.
-                </div>
-              </div>
-            )}
+            <div className="artifact-arrow">→</div>
           </div>
+        ) : isSystem ? (
+          renderToolCard(message.content)
         ) : isUser ? (
           /* User message */
           <span style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</span>
@@ -425,23 +434,42 @@ export default function MessageBubble({
               <div className="file-edits-label">File Changes</div>
               {message.fileEdits.some(e => e.status === 'pending') && (
                 <div style={{ display: 'flex', gap: '6px' }}>
-                  <button className="batch-btn accept" onClick={() => onAcceptAllFiles(messageIndex)}>
+                  <button className="batch-btn accept" onClick={() => store.handleAcceptAllFiles(messageIndex)}>
                     Accept All
                   </button>
-                  <button className="batch-btn decline" onClick={() => onDeclineAllFiles(messageIndex)}>
+                  <button className="batch-btn decline" onClick={() => store.handleDeclineAllFiles(messageIndex)}>
                     Decline All
                   </button>
                 </div>
               )}
             </div>
             {message.fileEdits.map((edit, idx) => (
-              <FileDiffViewer
-                key={idx}
-                edit={edit}
-                onAccept={(editedCode) => onAcceptFile(messageIndex, idx, editedCode)}
-                onDecline={() => onDeclineFile(messageIndex, idx)}
-                onViewDiff={() => onViewDiff(messageIndex, idx)}
-              />
+              <div 
+                key={idx} 
+                className="artifact-card diff" 
+                onClick={() => store.setActiveWorkspaceView({ type: 'diff', messageIndex, fileIndex: idx })}
+              >
+                <div className="artifact-icon">📄</div>
+                <div className="artifact-info">
+                  <div className="artifact-title">{(edit.filePath || edit.path || '').split(/[/\\]/).pop() || '(unnamed)'}</div>
+                  <div className="artifact-status" style={{ color: edit.status === 'pending' ? 'var(--warning)' : edit.status === 'accepted' ? 'var(--success)' : 'var(--danger)' }}>
+                    {edit.status}
+                  </div>
+                </div>
+                {edit.status === 'declined' && store.handleUndoDeclineFile && (
+                  <button 
+                    className="batch-btn accept" 
+                    style={{ marginLeft: 'auto', marginRight: '10px' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      store.handleUndoDeclineFile(messageIndex, idx);
+                    }}
+                  >
+                    ↩ Undo
+                  </button>
+                )}
+                <div className="artifact-arrow">→</div>
+              </div>
             ))}
           </div>
         )}
@@ -453,13 +481,14 @@ export default function MessageBubble({
               <CommandPermissionViewer
                 key={idx}
                 cmd={cmd}
-                onAccept={() => onAcceptCommand(messageIndex, idx)}
-                onDecline={() => onDeclineCommand(messageIndex, idx)}
+                onAccept={() => store.handleAcceptCommand(messageIndex, idx)}
+                onDecline={() => store.handleDeclineCommand(messageIndex, idx)}
               />
             ))}
           </div>
         )}
       </div>
     </div>
+  </div>
   );
 }

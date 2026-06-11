@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import TaskExecutionPanel from './TaskExecutionPanel';
 
 export default function AgentStatusPanel({ statusHistory, isLoading }) {
   const containerRef = useRef(null);
@@ -18,6 +19,9 @@ export default function AgentStatusPanel({ statusHistory, isLoading }) {
 
   return (
     <div className="agent-status-panel" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      {/* ── Task Execution Runtime Panel (shows during plan execution) ── */}
+      <TaskExecutionPanel />
+
       {/* Loop Detection Banner */}
       {loopDetected && (
         <div style={{ background: 'rgba(248, 81, 73, 0.1)', border: '1px solid #f85149', borderRadius: '6px', padding: '12px', color: '#ff7b72', fontSize: '13px' }}>
