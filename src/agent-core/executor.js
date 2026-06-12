@@ -203,6 +203,21 @@ async function runExecutor(step, context, args) {
           "Tool Execution Failed: No workspace file writer access.",
         );
       }
+    } else if (toolName === "fs.deleteFile") {
+      if (!step.input || typeof step.input.path !== "string") {
+        throw new Error(
+          "Tool Execution Failed: 'path' argument must be a string.",
+        );
+      }
+      if (args.proposeFileWrite) {
+        args.proposeFileWrite({
+          filePath: step.input.path,
+          isDelete: true,
+        });
+        executionOutput += `\nProposed file deletion: ${step.input.path}`;
+      } else {
+        throw new Error("Tool Execution Failed: No workspace file writer access.");
+      }
     } else if (toolName === "fs.readFile") {
       const fs = require("fs");
       const path = require("path");
@@ -247,6 +262,13 @@ async function runExecutor(step, context, args) {
             cmd = cmdArgs[1];
             cmdArgs = cmdArgs.slice(2);
          }
+      }
+
+      const destructiveCommands = ["rm", "rmdir", "del", "erase", "format", "dd", "sudo"];
+      if (destructiveCommands.includes(cmd.toLowerCase())) {
+        throw new Error(
+          "SECURITY_VIOLATION: Destructive operations require explicit user confirmation in a separate step. Do not execute this command directly."
+        );
       }
 
       if (!toolDefinition.allowedCommands.includes(cmd)) {

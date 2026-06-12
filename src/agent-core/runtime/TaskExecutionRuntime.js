@@ -87,6 +87,19 @@ class TaskExecutionRuntime {
         return { success: false, completedSteps: this.taskQueue.doneCount, error: 'Aborted by user' };
       }
 
+      // ── Handle Previously Resolved Tasks (Batched) ─────────────────────────
+      if (task._resolvedStatus === "declined") {
+         task.status = TASK_STATUS.COMPLETED;
+         this.taskQueue.markDone(task);
+         this._emitStepDone(task);
+         continue;
+      } else if (task._resolvedStatus === "accepted") {
+         task.status = TASK_STATUS.COMPLETED;
+         this.taskQueue.markDone(task);
+         this._emitStepDone(task);
+         continue;
+      }
+
       // ── Pause/modify handshake ─────────────────────────────────────────────
       if (this._pauseSignal) {
         this.state = RUNTIME_STATE.PAUSED;
@@ -103,49 +116,88 @@ class TaskExecutionRuntime {
       // ── File Permission Pause ──────────────────────────────────────────────
       const writingTools = ['fs.writeFile', 'fs.editFile', 'fs.deleteFile'];
       if (writingTools.includes(task.step.tool) && !task.approved) {
+        // Batch contiguous file writes
+        const batchedTasks = [task];
+        let peekIndex = 0;
+        while (peekIndex < this.taskQueue.queue.length) {
+           const nextTask = this.taskQueue.queue[peekIndex];
+           if (writingTools.includes(nextTask.step.tool) && !nextTask.approved) {
+              batchedTasks.push(nextTask);
+              peekIndex++;
+           } else {
+              break;
+           }
+        }
+
         const sess = require('../../memory/shortTerm').getSession(this.args.sessionId);
         if (sess) {
-            let newCode = "";
-            let originalCode = "";
+            const fileEdits = [];
             const fs = require('fs');
             const path = require('path');
-            const fullPath = path.resolve(this.args.workspaceRoot, task.step.input.path);
-            
-            if (fs.existsSync(fullPath)) {
-               originalCode = fs.readFileSync(fullPath, 'utf-8');
-            }
 
-            if (task.step.tool === "fs.writeFile") {
-               newCode = task.step.input.content;
-            } else if (task.step.tool === "fs.editFile") {
-               const lines = originalCode.split("\n");
-               const startIdx = task.step.input.startLine - 1;
-               const endIdx = task.step.input.endLine - 1;
-               if (startIdx >= 0 && endIdx < lines.length && startIdx <= endIdx) {
-                 newCode = [
-                   ...lines.slice(0, startIdx),
-                   task.step.input.replace,
-                   ...lines.slice(endIdx + 1),
-                 ].join("\n");
-               } else {
-                 newCode = originalCode;
-               }
+            const fileEditsMap = {};
+
+            for (const bTask of batchedTasks) {
+                let newCode = "";
+                let originalCode = "";
+                const fullPath = path.resolve(this.args.workspaceRoot, bTask.step.input.path);
+                
+                if (fileEditsMap[fullPath] !== undefined) {
+                    originalCode = fileEditsMap[fullPath].newCode;
+                } else if (fs.existsSync(fullPath)) {
+                    originalCode = fs.readFileSync(fullPath, 'utf-8');
+                }
+
+                if (bTask.step.tool === "fs.writeFile") {
+                   newCode = bTask.step.input.content;
+                } else if (bTask.step.tool === "fs.editFile") {
+                   const lines = originalCode.split("\n");
+                   const startIdx = bTask.step.input.startLine - 1;
+                   const endIdx = bTask.step.input.endLine - 1;
+                   if (startIdx >= 0 && endIdx < lines.length && startIdx <= endIdx) {
+                     newCode = [
+                       ...lines.slice(0, startIdx),
+                       bTask.step.input.replace,
+                       ...lines.slice(endIdx + 1),
+                     ].join("\n");
+                   } else {
+                     newCode = originalCode;
+                   }
+                }
+
+                if (!fileEditsMap[fullPath]) {
+                    fileEditsMap[fullPath] = {
+                        originalCode: originalCode,
+                        newCode: newCode,
+                        isNew: bTask.step.tool === "fs.writeFile",
+                        isDelete: bTask.step.tool === "fs.deleteFile",
+                        tasks: [bTask]
+                    };
+                } else {
+                    fileEditsMap[fullPath].newCode = newCode;
+                    if (bTask.step.tool === "fs.deleteFile") fileEditsMap[fullPath].isDelete = true;
+                    fileEditsMap[fullPath].tasks.push(bTask);
+                }
+            }
+            
+            for (const fullPath of Object.keys(fileEditsMap)) {
+                const edit = fileEditsMap[fullPath];
+                fileEdits.push({
+                   filePath: edit.tasks[0].step.input.path,
+                   newCode: edit.newCode,
+                   originalCode: edit.originalCode,
+                   isNew: edit.isNew,
+                   isDelete: edit.isDelete,
+                   status: "pending",
+                   _taskIndices: edit.tasks.map(t => t.stepIndex)
+                });
             }
 
             sess.messages.push({
                role: "assistant",
-               content: `Proposed file action: ${task.step.input.path}`,
+               content: `Proposed file actions`,
                isPlan: false,
-               fileEdits: [
-                 {
-                   filePath: task.step.input.path,
-                   newCode: newCode,
-                   originalCode: originalCode,
-                   isNew: task.step.tool === "fs.writeFile",
-                   isDelete: task.step.tool === "fs.deleteFile",
-                   status: "pending",
-                 },
-               ],
+               fileEdits: fileEdits,
             });
             require('../../memory/shortTerm').saveSession(this.args.sessionId, sess);
             if (this.args.vscodePanel) {
@@ -161,22 +213,50 @@ class TaskExecutionRuntime {
             }
         }
 
-        task.approved = true;
+        for (const bTask of batchedTasks) {
+            bTask.approved = true;
+        }
+        
         this.taskQueue.markPaused(task);
         this.state = RUNTIME_STATE.PAUSED;
         this._emit({ event: 'RUNTIME_PAUSED', pausedAtStep: task.stepIndex });
+
         
         await this._waitForResume();
         
-        this.state = RUNTIME_STATE.RUNNING;
+        let activeSess = require('../../memory/shortTerm').getSession(this.args.sessionId);
+        let lastMsg = activeSess?.messages[activeSess.messages.length - 1];
+        let pendingFiles = lastMsg?.fileEdits?.filter(e => e.status === 'pending');
         
-        if (this._resumeActionStatus === "declined") {
+        while (pendingFiles && pendingFiles.length > 0) {
+            this.state = RUNTIME_STATE.PAUSED;
+            await this._waitForResume();
+            activeSess = require('../../memory/shortTerm').getSession(this.args.sessionId);
+            lastMsg = activeSess?.messages[activeSess.messages.length - 1];
+            pendingFiles = lastMsg?.fileEdits?.filter(e => e.status === 'pending');
+        }
+        
+        this.state = RUNTIME_STATE.RUNNING;
+
+        // Apply statuses back to tasks
+        if (lastMsg?.fileEdits) {
+            for (const edit of lastMsg.fileEdits) {
+                if (edit._taskIndices) {
+                    for (const idx of edit._taskIndices) {
+                        const bTask = batchedTasks.find(t => t.stepIndex === idx);
+                        if (bTask) bTask._resolvedStatus = edit.status;
+                    }
+                }
+            }
+        }
+
+        if (task._resolvedStatus === "declined") {
            // Skip execution on decline
            task.status = TASK_STATUS.COMPLETED;
            this.taskQueue.markDone(task);
            this._emitStepDone(task);
            continue;
-        } else if (this._resumeActionStatus === "accepted") {
+        } else if (task._resolvedStatus === "accepted") {
            // The extension.js has ALREADY applied the file write!
            // Skip execution to avoid redundant writes
            task.status = TASK_STATUS.COMPLETED;

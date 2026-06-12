@@ -13,16 +13,23 @@ async function runValidator(state, args) {
   const steps = plan.executionPlan || [];
   let validationErrors = [];
 
+  // Track files created within the plan to avoid false positives in validation
+  const simulatedFiles = new Set();
+
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const tool = step.tool;
     const input = step.input || {};
 
+    if (tool === "fs.writeFile" && input.path) {
+      simulatedFiles.add(path.resolve(args.workspaceRoot, input.path));
+    }
+
     // 1. Pre-flight checks for file existence
     if (tool === "fs.readFile" || tool === "fs.editFile" || tool === "fs.deleteFile") {
       if (input.path) {
         const fullPath = path.resolve(args.workspaceRoot, input.path);
-        if (!fs.existsSync(fullPath)) {
+        if (!fs.existsSync(fullPath) && !simulatedFiles.has(fullPath)) {
           validationErrors.push(`Step ${i+1} (${tool}): Target file does not exist '${input.path}'`);
         }
       }
@@ -31,7 +38,7 @@ async function runValidator(state, args) {
     // 2. Validate line ranges for fs.editFile
     if (tool === "fs.editFile" && input.path) {
       const fullPath = path.resolve(args.workspaceRoot, input.path);
-      if (fs.existsSync(fullPath)) {
+      if (fs.existsSync(fullPath) && !simulatedFiles.has(fullPath)) {
         if (typeof input.startLine !== "number" || typeof input.endLine !== "number") {
           validationErrors.push(`Step ${i+1} (${tool}): 'startLine' and 'endLine' arguments must be numbers`);
         } else {

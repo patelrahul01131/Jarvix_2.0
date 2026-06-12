@@ -147,7 +147,7 @@ function fileExistsInWorkspace(filePath) {
   return fs.existsSync(fullPath);
 }
 
-function deleteFileFromWorkspace(filePath) {
+async function deleteFileFromWorkspace(filePath) {
   const root = getWorkspaceRoot();
   if (!root) throw new Error("No workspace folder open.");
   const fullPath = path.isAbsolute(filePath)
@@ -161,7 +161,11 @@ function deleteFileFromWorkspace(filePath) {
   }
 
   if (fs.existsSync(fullPath)) {
-    fs.unlinkSync(fullPath);
+    try {
+      await vscode.workspace.fs.delete(vscode.Uri.file(fullPath), { useTrash: true });
+    } catch (e) {
+      fs.unlinkSync(fullPath);
+    }
     return true;
   }
   return false;

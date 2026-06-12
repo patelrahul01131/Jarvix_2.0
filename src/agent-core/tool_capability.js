@@ -8,8 +8,8 @@ function buildToolCapabilityContext() {
   const capabilityRegistry = {
     "terminal.exec": {
       description: "Execute a single command line utility. To run in a specific directory, provide the 'cwd' property. Do NOT chain commands like 'cd foo && npm install'—instead, set cmd: 'npm', args: ['install'], cwd: 'foo'.",
-      allowedCommands: ["npm", "node", "git", "npx"],
-      blockedCommands: ["cmd", "powershell", "bash", "mkdir", "rm", "cp", "mv"],
+      allowedCommands: ["npm", "node", "git", "npx", "cd", "mkdir", "dir", "ls", "cat", "type", "echo"],
+      blockedCommands: ["cmd", "powershell", "bash", "rm", "cp", "mv"],
       cannotCreateDirectories: true,
       requiresApproval: false,
       riskLevel: "medium"

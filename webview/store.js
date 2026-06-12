@@ -457,7 +457,7 @@ export const useStore = create((set, get) => ({
   handleAcceptFile: (messageIndex, fileIndex, editedCode) => {
     const state = get();
     const session = state.sessions[state.activeSessionId];
-    if (session?.messages[messageIndex]) {
+    if (session?.messages[messageIndex]?.fileEdits) {
       const edit = session.messages[messageIndex].fileEdits[fileIndex];
       if (vscode) {
         vscode.postMessage({
@@ -502,7 +502,7 @@ export const useStore = create((set, get) => ({
   handleViewDiff: (messageIndex, fileIndex) => {
     const state = get();
     const session = state.sessions[state.activeSessionId];
-    if (session?.messages[messageIndex]) {
+    if (session?.messages[messageIndex]?.fileEdits) {
       const edit = session.messages[messageIndex].fileEdits[fileIndex];
       if (vscode) {
         vscode.postMessage({

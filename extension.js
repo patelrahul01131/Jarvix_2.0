@@ -73,7 +73,7 @@ async function applyAtomicTransaction(edits, panel) {
         if (fs.existsSync(fullPath)) {
           content = fs.readFileSync(fullPath, "utf8");
         }
-        const success = deleteFileFromWorkspace(edit.filePath);
+        const success = await deleteFileFromWorkspace(edit.filePath);
         if (!success)
           throw new Error(
             `File not found or could not be deleted: ${edit.filePath}`,
@@ -107,7 +107,7 @@ async function applyAtomicTransaction(edits, panel) {
           console.log(`[Jarvix] Rolled back: ${w.filePath}`);
         } else if (w.isNew) {
           // Delete the newly created file
-          deleteFileFromWorkspace(w.filePath);
+          await deleteFileFromWorkspace(w.filePath);
           console.log(`[Jarvix] Rolled back (deleted new file): ${w.filePath}`);
         }
       } catch (rbErr) {
@@ -149,6 +149,7 @@ async function writeAndSync(filePath, code, panel) {
 
   const openDoc = vscode.workspace.textDocuments.find(
     (d) =>
+      !d.isClosed &&
       d.fileName.toLowerCase().replace(/\\/g, "/") ===
       absolutePath.toLowerCase().replace(/\\/g, "/"),
   );
@@ -193,6 +194,42 @@ function activate(context) {
     let activeAbortController = null;
 
     panel.webview.onDidReceiveMessage(async (msg) => {
+      async function resumeAgentFallback(questionText) {
+        try {
+          activeAbortController = new AbortController();
+          await askAgent({
+            workspaceRoot: getWorkspaceRoot(),
+            workspaceFiles: listWorkspaceFiles(),
+            question: questionText,
+            executePlan: true,
+            sessionId: msg.sessionId,
+            model: msg.model,
+            provider: msg.provider,
+            signal: activeAbortController.signal,
+            onStatus: (status) => panel.webview.postMessage({ type: "status", status }),
+            onState: (stateUpdate) => {
+              const safeUpdate = { ...stateUpdate };
+              delete safeUpdate._runtime;
+              panel.webview.postMessage({ type: "AGENT_STATE", ...safeUpdate });
+            },
+            onChunk: (partialReply) => panel.webview.postMessage({ type: "partialReply", sessionId: msg.sessionId, content: partialReply }),
+            onFileWrite: async ({ filePath, code, isNew }) => {
+              try {
+                await writeAndSync(filePath, code, panel);
+                panel.webview.postMessage({ type: "fileAutoWritten", filePath, isNew });
+              } catch (e) {}
+            },
+          });
+        } catch (err) {
+          console.error("resumeAgentFallback error:", err);
+          vscode.window.showErrorMessage("Jarvix error: " + err.message);
+        } finally {
+          activeAbortController = null;
+          panel.webview.postMessage({ type: "sessionsLoaded", sessions: getAllSessions() });
+          panel.webview.postMessage({ type: "reply", sessionId: msg.sessionId, session: getAllSessions()[msg.sessionId] });
+        }
+      }
+
       switch (msg.type) {
         case "getSessions": {
           const sessions = getAllSessions();
@@ -555,11 +592,13 @@ function activate(context) {
             }
             if (activeRuntimes[msg.sessionId]) {
               activeRuntimes[msg.sessionId].resume(null, "accepted");
+              panel.webview.postMessage({
+                type: "sessionsLoaded",
+                sessions: getAllSessions(),
+              });
+            } else {
+              await resumeAgentFallback("File action applied. Proceed.");
             }
-            panel.webview.postMessage({
-              type: "sessionsLoaded",
-              sessions: getAllSessions(),
-            });
           } catch (err) {
             vscode.window.showErrorMessage("Action error: " + err.message);
           }
@@ -582,11 +621,13 @@ function activate(context) {
           }
           if (activeRuntimes[msg.sessionId]) {
             activeRuntimes[msg.sessionId].resume(null, "declined");
+            panel.webview.postMessage({
+              type: "sessionsLoaded",
+              sessions: getAllSessions(),
+            });
+          } else {
+            await resumeAgentFallback("File action declined. Re-plan and proceed.");
           }
-          panel.webview.postMessage({
-            type: "sessionsLoaded",
-            sessions: getAllSessions(),
-          });
           break;
         }
 
@@ -847,10 +888,15 @@ function activate(context) {
               saveSession(msg.sessionId, session);
             }
           }
-          panel.webview.postMessage({
-            type: "sessionsLoaded",
-            sessions: getAllSessions(),
-          });
+          if (activeRuntimes[msg.sessionId]) {
+            activeRuntimes[msg.sessionId].resume(null, "declined");
+            panel.webview.postMessage({
+              type: "sessionsLoaded",
+              sessions: getAllSessions(),
+            });
+          } else {
+            await resumeAgentFallback("Terminal command declined. Re-plan and proceed.");
+          }
           break;
         }
 

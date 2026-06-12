@@ -1330,107 +1330,119 @@ async function askAgent(args) {
   let classification = null;
   let goalData = null;
 
+  const isSystemObservation = question && (question.includes("User EXECUTED") || question.includes("User ACCEPTED") || question.includes("System: [OBSERVATION]"));
+
   if (!args.executePlan && question) {
-    try {
-      if (onStatus)
-        onStatus(`[${new Date().toLocaleTimeString()}] 🧠 Analyzing intent...`);
-      classification = await classifyIntent(question, loopArgs);
-      if (onStatus)
-        onStatus(
-          `[${new Date().toLocaleTimeString()}] 🧭 Intent: ${classification.intent} (Mode: ${classification.execution_mode.toUpperCase()})`,
+    if (isSystemObservation) {
+      classification = {
+        intent: "CODE_MODIFICATION",
+        execution_mode: "agent",
+        risk_level: "low",
+        complexity: 50
+      };
+      goalData = { goal: session?.taskMemory?.goal || question, resetMemory: false };
+    } else {
+      try {
+        if (onStatus)
+          onStatus(`[${new Date().toLocaleTimeString()}] 🧠 Analyzing intent...`);
+        classification = await classifyIntent(question, loopArgs);
+        if (onStatus)
+          onStatus(
+            `[${new Date().toLocaleTimeString()}] 🧭 Intent: ${classification.intent} (Mode: ${classification.execution_mode.toUpperCase()})`,
+          );
+
+        // ─── Phase 1: Register Goal with GoalManager ──────────────────────────
+        if (
+          classification.execution_mode !== "chat" &&
+          classification.execution_mode !== "qa"
+        ) {
+          const trackedGoal = goalManager.createGoal({
+            title: question.slice(0, 120),
+            priority: classification.risk_level === "high" ? "high" : "normal",
+          });
+          session.goalId = trackedGoal.id;
+          if (onStatus)
+            onStatus(
+              `[${new Date().toLocaleTimeString()}] 🎯 Goal registered: ${trackedGoal.title.slice(0, 30)}`,
+            );
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        const prevGoal = session.taskMemory?.goal || "";
+        goalData = await normalizeGoal(
+          question,
+          classification.intent,
+          prevGoal,
+          loopArgs,
         );
 
-      // ─── Phase 1: Register Goal with GoalManager ──────────────────────────
-      if (
-        classification.execution_mode !== "chat" &&
-        classification.execution_mode !== "qa"
-      ) {
-        const trackedGoal = goalManager.createGoal({
-          title: question.slice(0, 120),
-          priority: classification.risk_level === "high" ? "high" : "normal",
+        if (goalData.resetMemory) {
+          if (onStatus)
+            onStatus(
+              `[${new Date().toLocaleTimeString()}] 🧹 Resetting task memory...`,
+            );
+          session.taskMemory = {
+            completed: [],
+            active: [],
+            pending: [],
+            goal: goalData.goal,
+            current_step: "Initializing",
+          };
+          session.workingMemory = { activeFiles: [] };
+          session.contextBoundary = session.messages.length;
+        } else {
+          session.taskMemory.goal = goalData.goal;
+        }
+
+        if (goalData.extractedFacts) {
+          const longTerm = shortTerm.getLongTermMemory();
+          if (goalData.extractedFacts.name)
+            longTerm.name = goalData.extractedFacts.name;
+          if (Array.isArray(goalData.extractedFacts.preferences)) {
+            longTerm.preferences = [
+              ...new Set([
+                ...longTerm.preferences,
+                ...goalData.extractedFacts.preferences,
+              ]),
+            ];
+          }
+          if (Array.isArray(goalData.extractedFacts.facts)) {
+            longTerm.facts = [
+              ...new Set([...longTerm.facts, ...goalData.extractedFacts.facts]),
+            ];
+          }
+          shortTerm.updateLongTermMemory(longTerm);
+        }
+
+        session.userProfile = shortTerm.getLongTermMemory();
+
+        if (!session.developerTools) session.developerTools = [];
+        session.developerTools.push({
+          type: "timeline",
+          data: {
+            message: `Intent: ${classification.intent} | Goal: ${goalData.goal}`,
+          },
+          timestamp: new Date().toLocaleTimeString(),
         });
-        session.goalId = trackedGoal.id;
-        if (onStatus)
-          onStatus(
-            `[${new Date().toLocaleTimeString()}] 🎯 Goal registered: ${trackedGoal.title.slice(0, 30)}`,
-          );
-      }
-      // ─────────────────────────────────────────────────────────────────────
-
-      const prevGoal = session.taskMemory?.goal || "";
-      goalData = await normalizeGoal(
-        question,
-        classification.intent,
-        prevGoal,
-        loopArgs,
-      );
-
-      if (goalData.resetMemory) {
-        if (onStatus)
-          onStatus(
-            `[${new Date().toLocaleTimeString()}] 🧹 Resetting task memory...`,
-          );
-        session.taskMemory = {
-          completed: [],
-          active: [],
-          pending: [],
-          goal: goalData.goal,
-          current_step: "Initializing",
-        };
-        session.workingMemory = { activeFiles: [] };
-        session.contextBoundary = session.messages.length;
-      } else {
-        session.taskMemory.goal = goalData.goal;
-      }
-
-      if (goalData.extractedFacts) {
-        const longTerm = shortTerm.getLongTermMemory();
-        if (goalData.extractedFacts.name)
-          longTerm.name = goalData.extractedFacts.name;
-        if (Array.isArray(goalData.extractedFacts.preferences)) {
-          longTerm.preferences = [
-            ...new Set([
-              ...longTerm.preferences,
-              ...goalData.extractedFacts.preferences,
-            ]),
-          ];
+      } catch (err) {
+        console.error("[Agent OS] Pre-processing failed:", err);
+        session.agentStatus = "🔴 Error";
+        patchedOnChunk(
+          `\n⚠️ **System Error:** Could not process intent. ${err.message}\n`,
+        );
+        const updatedSession = shortTerm.getSession(sessionId);
+        if (updatedSession) {
+          const lastAssistantMsg = [...updatedSession.messages]
+            .reverse()
+            .find((m) => m.role === "assistant");
+          if (lastAssistantMsg) {
+            lastAssistantMsg.content = fullResponse;
+            lastAssistantMsg.streaming = false;
+          }
+          shortTerm.saveSession(sessionId, updatedSession);
         }
-        if (Array.isArray(goalData.extractedFacts.facts)) {
-          longTerm.facts = [
-            ...new Set([...longTerm.facts, ...goalData.extractedFacts.facts]),
-          ];
-        }
-        shortTerm.updateLongTermMemory(longTerm);
+        return { status: "FAILED", context: null };
       }
-
-      session.userProfile = shortTerm.getLongTermMemory();
-
-      if (!session.developerTools) session.developerTools = [];
-      session.developerTools.push({
-        type: "timeline",
-        data: {
-          message: `Intent: ${classification.intent} | Goal: ${goalData.goal}`,
-        },
-        timestamp: new Date().toLocaleTimeString(),
-      });
-    } catch (err) {
-      console.error("[Agent OS] Pre-processing failed:", err);
-      session.agentStatus = "🔴 Error";
-      patchedOnChunk(
-        `\n⚠️ **System Error:** Could not process intent. ${err.message}\n`,
-      );
-      const updatedSession = shortTerm.getSession(sessionId);
-      if (updatedSession) {
-        const lastAssistantMsg = [...updatedSession.messages]
-          .reverse()
-          .find((m) => m.role === "assistant");
-        if (lastAssistantMsg) {
-          lastAssistantMsg.content = fullResponse;
-          lastAssistantMsg.streaming = false;
-        }
-        shortTerm.saveSession(sessionId, updatedSession);
-      }
-      return { status: "FAILED", context: null };
     }
   }
 
@@ -1499,7 +1511,8 @@ async function askAgent(args) {
     } else {
       // Fallback: route unknown goal-management to agent loop for LLM interpretation
       session.agentStatus = "🔵 Executing";
-      result = await runAgentLoop(question, loopArgs);
+      const loopGoal = goalData ? goalData.goal : question;
+      result = await runAgentLoop(loopGoal, loopArgs);
       session.agentStatus = result.status === "FAILED" ? "🔴 Error" : "🟢 Idle";
       gmResponse = null;
     }
@@ -1592,7 +1605,10 @@ async function askAgent(args) {
           "If the user asks a general or non-technical question, answer in a friendly, plain-English tone without academic jargon, and do NOT attempt to pivot the conversation back to coding or technical topics. " +
           "CRITICAL RULE FOR AMBIGUOUS QUESTIONS: If a user asks a broad or ambiguous technical question (like 'how do you create a table'), you MUST NOT guess their framework or provide a multi-framework tutorial. You MUST reply with ONLY a single sentence asking for clarification (e.g., 'Are you asking about SQL, Excel, React, or something else?'). Stop generation immediately after asking. Do not provide any code or examples until they answer.\n\n" +
           "For riddles, logic puzzles, or situations requiring inference, you MUST explicitly write out your step-by-step logical deductions before giving the final answer. Actively look for hidden clues and implicit rules (e.g., how many people are needed for a specific activity). Do not simply say there is not enough information if a logical deduction can be made from the context.\n\n" +
-          "Prioritize clarity over comprehensiveness. Maintain strict factual precision regarding proper nouns, entities, and technical terms; do not blur or confuse similar-sounding names or concepts.";
+          "Prioritize clarity over comprehensiveness. Maintain strict factual precision regarding proper nouns, entities, and technical terms; do not blur or confuse similar-sounding names or concepts.\n\n" +
+          "TRUTH OVER NARRATIVE: Do not describe the completion of a task until the system confirms the action has physically occurred. Never predict or hallucinate the outcome of future steps.\n" +
+          "NO TECHNICAL ROLEPLAY: Do not claim to use complex methods (like Python, mmap, or binary checks) if you are using simple filesystem tools. Report your actions honestly and simply.\n" +
+          "STATE CONSISTENCY: Your chat response must match the current state of the execution plan. If the plan is 'pending', do not tell the user it is 'done'.";
       }
 
       let rawDraft = "";
@@ -1672,7 +1688,8 @@ async function askAgent(args) {
       onStatus(
         `[${new Date().toLocaleTimeString()}] 🧠 Initializing Agent OS...`,
       );
-    result = await runAgentLoop(question, loopArgs);
+    const loopGoal = goalData ? goalData.goal : question;
+    result = await runAgentLoop(loopGoal, loopArgs);
     session.agentStatus = result.status === "FAILED" ? "🔴 Error" : "🟢 Idle";
   }
 

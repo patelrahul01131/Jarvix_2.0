@@ -12,7 +12,7 @@ const TOOL_REGISTRY = {
       args: "array", // Array of string arguments
       cwd: "string?", // Optional relative path to run the command in
     },
-    allowedCommands: ["npm", "node", "git", "npx", "cd", "mkdir"],
+    allowedCommands: ["npm", "node", "git", "npx", "cd", "mkdir", "dir", "ls", "cat", "type", "echo"],
     risk: "medium",
   },
   "fs.writeFile": {
@@ -32,6 +32,13 @@ const TOOL_REGISTRY = {
       newContent: "string",
     },
     risk: "low",
+  },
+  "fs.deleteFile": {
+    description: "Delete an existing file.",
+    schema: {
+      path: "string",
+    },
+    risk: "high",
   },
   "fs.readFile": {
     description: "Read the contents of a file.",

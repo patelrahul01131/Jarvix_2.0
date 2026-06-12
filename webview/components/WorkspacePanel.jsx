@@ -63,6 +63,7 @@ export default function WorkspacePanel({ activeSession, activeView }) {
   }
 
   if (activeView.type === "diff" && activeView.fileIndex !== undefined) {
+    if (!message.fileEdits) return null;
     const edit = message.fileEdits[activeView.fileIndex];
     if (!edit) return null;
 
