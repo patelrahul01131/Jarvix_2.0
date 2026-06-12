@@ -237,6 +237,7 @@ Your strategy is constrained by the Action Policy: ${actionPolicy}
 ${taskMutationPrompt}
 CRITICAL RULE 1 (DAG Chunking): Do not attempt to build the entire goal in one plan. You MUST use DAG Chunking. Output a maximum of 3 to 4 execution steps representing a single phase (e.g., "Phase 1: Scaffold").
 CRITICAL RULE 2 (Phase Lock): You must assign a strict 'phase' string to EVERY step. ALL steps in your plan MUST share the exact same 'phase' string. Do not mix UI code generation with scaffolding in a single plan chunk. You will be re-invoked to plan Phase 2 later.
+
 When outputting multi-step plans, visualize them as a Directed Acyclic Graph (DAG). Think about dependencies: what must happen before X?
 
 [STRICT JSON OUTPUT REQUIREMENT & PATCH EDITING]
@@ -581,7 +582,7 @@ Your output must conform to this schema:
     console.error("[Planner] Failed to generate plan:", err.message);
     const isRateLimit = /429|quota|rate limit/i.test(err.message);
     const userMsg = isRateLimit
-      ? "⚠️ **Jarvix is experiencing high load or rate limits. Please try again shortly.**"
+      ? "⚠️ **Current model is experiencing high load or rate limits. Please try Other Model.**"
       : "⚠️ **Could not generate a plan due to a connection issue. Please try again.**";
 
     if (onChunk) onChunk(`\n${userMsg}\n\n`);

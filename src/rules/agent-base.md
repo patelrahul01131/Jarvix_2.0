@@ -25,3 +25,8 @@ Your mission is to write extremely robust, production-grade, clean code adhering
 - If you are not given context for a file but need to modify it, ask the user to provide it first.
 - Never make speculative or "while I'm here" changes to unrelated files.
 - When the session memory shows previously modified files, use that as reference — do not re-create them from scratch.
+
+## node_modules Rules (CRITICAL)
+
+- Never attempt to manually modify the `node_modules` directory or mock core libraries using file operations like `fs.writeFile`.
+- If a dependency is missing and `npm install` is unavailable, report the limitation to the user immediately. Do not attempt to fake the installation.

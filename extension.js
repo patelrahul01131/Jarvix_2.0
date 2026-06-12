@@ -15,6 +15,8 @@ const {
   clearAllSessions,
 } = require("./src/memory/shortTerm");
 
+const activeRuntimes = {}; // sessionId -> runtime
+
 // ─── Persistent backup log ─────────────────────────────────────────────────────
 /**
  * Write a backup of original file contents BEFORE any writes are applied.
@@ -234,9 +236,11 @@ function activate(context) {
               },
 
               onState: (stateUpdate) => {
+                const safeUpdate = { ...stateUpdate };
+                delete safeUpdate._runtime;
                 panel.webview.postMessage({
                   type: "AGENT_STATE",
-                  ...stateUpdate,
+                  ...safeUpdate,
                 });
               },
 
@@ -357,16 +361,15 @@ function activate(context) {
 
               // ── Runtime progress → UI ──────────────────────────────────────
               onState: (stateUpdate) => {
+                const safeUpdate = { ...stateUpdate };
+                delete safeUpdate._runtime;
                 panel.webview.postMessage({
                   type: "AGENT_STATE",
-                  ...stateUpdate,
+                  ...safeUpdate,
                 });
-                // Cache the runtime reference so we can pause/resume it later
-                if (
-                  stateUpdate.type !== "EXECUTION_PROGRESS" &&
-                  stateUpdate._runtime
-                ) {
-                  _activeRuntime = stateUpdate._runtime;
+                // Cache the runtime reference globally so we can pause/resume it later
+                if (stateUpdate._runtime) {
+                  activeRuntimes[msg.sessionId] = stateUpdate._runtime;
                 }
               },
 
@@ -376,6 +379,13 @@ function activate(context) {
                   sessionId: msg.sessionId,
                   ...progressEvent,
                 });
+                if (progressEvent.event === "RUNTIME_PAUSED") {
+                  panel.webview.postMessage({
+                    type: "reply",
+                    sessionId: msg.sessionId,
+                    session: getAllSessions()[msg.sessionId],
+                  });
+                }
               },
 
               onChunk: (partialReply) => {
@@ -404,7 +414,7 @@ function activate(context) {
               },
             });
             activeAbortController = null;
-            _activeRuntime = null;
+            delete activeRuntimes[msg.sessionId];
 
             panel.webview.postMessage({
               type: "reply",
@@ -543,6 +553,9 @@ function activate(context) {
                 saveSession(msg.sessionId, session);
               }
             }
+            if (activeRuntimes[msg.sessionId]) {
+              activeRuntimes[msg.sessionId].resume(null, "accepted");
+            }
             panel.webview.postMessage({
               type: "sessionsLoaded",
               sessions: getAllSessions(),
@@ -566,6 +579,9 @@ function activate(context) {
               });
               saveSession(msg.sessionId, session);
             }
+          }
+          if (activeRuntimes[msg.sessionId]) {
+            activeRuntimes[msg.sessionId].resume(null, "declined");
           }
           panel.webview.postMessage({
             type: "sessionsLoaded",

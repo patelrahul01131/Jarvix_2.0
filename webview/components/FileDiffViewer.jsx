@@ -1,37 +1,5 @@
-import { useState, useCallback } from 'react';
-
-function computeDiff(oldStr, newStr) {
-  const oldLines = oldStr ? oldStr.split(/\r?\n/) : [];
-  const newLines = newStr ? newStr.split(/\r?\n/) : [];
-  
-  const dp = Array(oldLines.length + 1).fill(null).map(() => Array(newLines.length + 1).fill(0));
-  for (let i = 1; i <= oldLines.length; i++) {
-    for (let j = 1; j <= newLines.length; j++) {
-      if (oldLines[i - 1] === newLines[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
-  }
-  
-  const diff = [];
-  let i = oldLines.length;
-  let j = newLines.length;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      diff.unshift({ type: 'unchanged', text: oldLines[i - 1] });
-      i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      diff.unshift({ type: 'added', text: newLines[j - 1] });
-      j--;
-    } else {
-      diff.unshift({ type: 'removed', text: oldLines[i - 1] });
-      i--;
-    }
-  }
-  return diff;
-}
+import { useState } from 'react';
+import { structuredPatch } from 'diff';
 
 export default function FileDiffViewer({ edit, onAccept, onDecline, onViewDiff }) {
   const { filePath, isNew, isDelete, originalCode, newCode } = edit;
@@ -41,12 +9,28 @@ export default function FileDiffViewer({ edit, onAccept, onDecline, onViewDiff }
 
   // Recompute diff against (possibly user-edited) code
   const displayCode = editMode ? editedCode : newCode;
-  const diffLines = isDelete ? [] : computeDiff(originalCode, displayCode);
-  const addedCount = diffLines.filter(l => l.type === 'added').length;
-  const removedCount = diffLines.filter(l => l.type === 'removed').length;
+  
+  // Use structuredPatch to get hunks with 3 lines of context
+  const patch = structuredPatch(
+    filePath, filePath, 
+    originalCode || '', displayCode || '', 
+    '', '', 
+    { context: 3 }
+  );
+
+  const hunks = isDelete ? [] : (patch.hunks || []);
+
+  // Compute counts roughly from hunks
+  let addedCount = 0;
+  let removedCount = 0;
+  hunks.forEach(hunk => {
+    hunk.lines.forEach(line => {
+      if (line.startsWith('+')) addedCount++;
+      if (line.startsWith('-')) removedCount++;
+    });
+  });
 
   function handleAccept() {
-    // Pass the (possibly user-edited) code to the accept handler
     onAccept(editMode ? editedCode : undefined);
   }
 
@@ -249,64 +233,106 @@ export default function FileDiffViewer({ edit, onAccept, onDecline, onViewDiff }
         </div>
       )}
 
-      {/* Diff view */}
+      {/* Unified Diff View */}
       <div style={{
         display: isExpanded ? 'block' : 'none',
         maxHeight: editMode ? '200px' : '450px',
         overflowY: 'auto',
         fontSize: '12px',
         lineHeight: '1.6',
-        padding: '4px 0'
+        padding: '4px 0',
+        background: 'var(--vscode-editor-background, #1e1e1e)',
       }}>
         {editMode && (
           <div style={{ padding: '4px 12px', fontSize: '11px', color: 'var(--vscode-descriptionForeground, #888)', borderBottom: '1px solid rgba(110,64,201,0.2)' }}>
             Live preview of your edits vs original:
           </div>
         )}
-        {diffLines.map((line, idx) => {
-          const isAdded = line.type === 'added';
-          const isRemoved = line.type === 'removed';
-          return (
-            <div
-              key={idx}
-              style={{
-                display: 'flex',
-                background: isAdded
-                  ? 'rgba(46, 164, 79, 0.18)'
-                  : isRemoved
-                  ? 'rgba(248, 81, 73, 0.18)'
-                  : 'transparent',
-                borderLeft: isAdded
-                  ? '3px solid #3fb950'
-                  : isRemoved
-                  ? '3px solid #f85149'
-                  : '3px solid transparent',
-                padding: '1px 10px 1px 8px',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all'
-              }}
-            >
-              <span style={{
-                width: '18px',
-                fontWeight: 'bold',
-                color: isAdded ? '#3fb950' : isRemoved ? '#f85149' : '#555',
-                userSelect: 'none',
-                flexShrink: 0,
-                display: 'inline-block'
-              }}>
-                {isAdded ? '+' : isRemoved ? '-' : ' '}
-              </span>
-              <span style={{
-                color: isAdded
-                  ? '#b5f0c0'
-                  : isRemoved
-                  ? '#ffa5a0'
-                  : 'var(--vscode-editor-foreground, #d4d4d4)',
-                flex: 1
-              }}>{line.text}</span>
+
+        {isNew && (
+          <div style={{ padding: '8px 12px', color: '#b5f0c0', whiteSpace: 'pre-wrap' }}>
+            {displayCode}
+          </div>
+        )}
+
+        {!isNew && hunks.length === 0 && (
+          <div style={{ padding: '8px 12px', color: 'var(--vscode-descriptionForeground, #888)', fontStyle: 'italic' }}>
+            No changes detected.
+          </div>
+        )}
+
+        {!isNew && hunks.map((hunk, hIdx) => (
+          <div key={hIdx} style={{ marginBottom: '12px' }}>
+            {/* Hunk Header */}
+            <div style={{ 
+              background: 'rgba(56, 139, 253, 0.15)', 
+              color: 'var(--vscode-textLink-foreground, #3794ff)',
+              padding: '2px 12px',
+              fontSize: '11px',
+              userSelect: 'none',
+              borderBottom: '1px solid rgba(56,139,253,0.2)',
+              borderTop: hIdx > 0 ? '1px solid rgba(56,139,253,0.2)' : 'none'
+            }}>
+              @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
             </div>
-          );
-        })}
+
+            {/* Hunk Lines */}
+            {hunk.lines.map((line, lIdx) => {
+              const isAdded = line.startsWith('+');
+              const isRemoved = line.startsWith('-');
+              
+              // Handle special "\ No newline at end of file"
+              if (line.startsWith('\\')) {
+                return (
+                  <div key={lIdx} style={{ color: '#888', padding: '1px 12px', fontStyle: 'italic' }}>
+                    {line}
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={lIdx}
+                  style={{
+                    display: 'flex',
+                    background: isAdded
+                      ? 'rgba(46, 164, 79, 0.18)'
+                      : isRemoved
+                      ? 'rgba(248, 81, 73, 0.18)'
+                      : 'transparent',
+                    borderLeft: isAdded
+                      ? '3px solid #3fb950'
+                      : isRemoved
+                      ? '3px solid #f85149'
+                      : '3px solid transparent',
+                    padding: '1px 10px 1px 8px',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all'
+                  }}
+                >
+                  <span style={{
+                    width: '18px',
+                    fontWeight: 'bold',
+                    color: isAdded ? '#3fb950' : isRemoved ? '#f85149' : '#555',
+                    userSelect: 'none',
+                    flexShrink: 0,
+                    display: 'inline-block'
+                  }}>
+                    {isAdded ? '+' : isRemoved ? '-' : ' '}
+                  </span>
+                  <span style={{
+                    color: isAdded
+                      ? '#b5f0c0'
+                      : isRemoved
+                      ? '#ffa5a0'
+                      : 'var(--vscode-editor-foreground, #d4d4d4)',
+                    flex: 1
+                  }}>{line.slice(1)}</span>
+                </div>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );

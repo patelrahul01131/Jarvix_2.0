@@ -7,6 +7,7 @@ CRITICAL RULES:
 2. When modifying an existing file, use "fs.editFile". Provide the exact line ranges and replacement text.
 3. If the user is just asking a question, YOU MUST use the "response" tool. DO NOT write explanations into files unless explicitly asked.
 4. File writes/edits are PROPOSED to the user and require manual approval. Do NOT use shell.exec on files you have just created or modified in the same plan.
+5. NEVER attempt to manually modify the node_modules directory or mock core libraries using fs.writeFile. If a dependency is missing and npm install is unavailable, report the limitation to the user immediately.
 10. terminal commands MUST run correctly on WINDOWS PowerShell. USE DOUBLE QUOTES (") for paths with spaces. DO NOT use single quotes ('). NEVER chain commands with "&&" (PowerShell does not support it). You MUST execute each command as a separate step, or use ";" to separate them.
 11. YOUR OUTPUT MUST BE STRICTLY VALID JSON. Escape all inner double quotes (\\") inside strings! Escape backslashes in paths (C:\\\\Users\\\\...)!
 12. NEVER use unescaped double quotes inside ANY string values (like "message", "content", or "command"). Use single quotes or properly escape them (e.g. \\"text\\").

@@ -363,16 +363,56 @@ export default function MessageBubble({
             </div>
           </>
         ) : message.isPlan ? (
-          /* Plan view Card */
-          <div className="artifact-card" onClick={() => store.setActiveWorkspaceView({ type: 'plan', messageIndex })}>
-            <div className="artifact-icon">📋</div>
-            <div className="artifact-info">
-              <div className="artifact-title">Implementation Plan</div>
-              <div className="artifact-status" style={{ color: message.planStatus === 'approved' ? 'var(--success)' : 'var(--warning)' }}>
-                {message.planStatus === 'approved' ? 'Approved' : 'Awaiting Review'}
-              </div>
+          /* Plan view Card -> Inline Roadmap */
+          <div className="plan-roadmap-container" style={{ padding: '8px', border: '1px solid var(--vscode-widget-border, #444)', borderRadius: '6px', background: 'var(--vscode-editor-background, #1e1e1e)' }}>
+            <div style={{ marginBottom: '12px' }}>
+              <MarkdownRenderer content={message.content} isStreaming={isStreaming} />
             </div>
-            <div className="artifact-arrow">→</div>
+            {message.planStatus === 'pending' && (
+              <div className="plan-actions" style={{ display: 'flex', gap: '8px', borderTop: '1px solid var(--vscode-widget-border, #444)', paddingTop: '12px' }}>
+                <button 
+                  className="btn-primary" 
+                  style={{ background: '#2ea44f', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                  onClick={() => store.handleApprovePlan(messageIndex)}
+                >
+                  🚀 Proceed & Implement
+                </button>
+              </div>
+            )}
+            {message.planStatus === 'approved' && (
+              <div className="plan-status-badge" style={{ display: 'flex', alignItems: 'center', gap: '8px', borderTop: '1px solid var(--vscode-widget-border, #444)', paddingTop: '12px' }}>
+                 {store.executionProgress?.runtimeState === 'RUNNING' ? (() => {
+                     const steps = Object.values(store.executionProgress.steps || {});
+                     const doneCount = steps.filter(s => s.status === 'done' || s.status === 'COMPLETED').length;
+                     const runningStep = steps.find(s => s.status === 'running');
+                     const total = store.executionProgress.totalSteps || message.planData?.length || '?';
+                     const actionLabel = runningStep?.action || runningStep?.tool || 'Initializing...';
+                     return (
+                       <>
+                         <span className="spinner-icon" style={{ display: 'inline-block', animation: 'spin 2s linear infinite' }}>⚙️</span> 
+                         <span style={{ fontWeight: 'bold', color: 'var(--vscode-textLink-foreground, #3794ff)' }}>
+                           Executing Step {doneCount + 1}/{total}: {actionLabel}
+                         </span>
+                       </>
+                     );
+                 })() : store.executionProgress?.runtimeState === 'PAUSED' ? (
+                     <>
+                       <span>⏸️</span> 
+                       <span style={{ fontWeight: 'bold', color: 'var(--vscode-editorWarning-foreground, #cca700)' }}>Paused for file permission. Please review the file changes at the bottom of the chat.</span>
+                     </>
+                 ) : store.executionProgress?.runtimeState === 'COMPLETED' ? (
+                     <>
+                       <span>🎉</span> 
+                       <span style={{ fontWeight: 'bold', color: '#2ea44f' }}>Plan fully executed!</span>
+                     </>
+                 ) : (
+                   <>
+                     <span>✅</span> 
+                     <span style={{ fontWeight: 'bold', color: '#2ea44f' }}>Plan Approved. Preparing execution...</span>
+                   </>
+                 )}
+              </div>
+            )}
           </div>
         ) : isSystem ? (
           renderToolCard(message.content)

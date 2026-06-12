@@ -35,8 +35,8 @@ router.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "Missing messages in body" });
     }
 
-    const selectedProvider = provider || "openrouter";
-    const selectedModel = model || "qwen/qwen3-coder:free";
+    const selectedProvider = provider || "mistral";
+    const selectedModel = model || "open-mistral-7b";
 
     // Call the bridge to stream response back
     await streamChatCompletion(

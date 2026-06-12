@@ -33,9 +33,10 @@
     }
     ```
 11. **CRITICAL — package.json:** NEVER write dependencies or devDependencies with version numbers. Use the `terminal` tool to run `npm install <packages>` instead.
-12. **CRITICAL — File Scope:** Only write or modify files DIRECTLY required by this request.
-13. **CRITICAL:** Do NOT auto-create boilerplate (package.json, README, .gitignore, tsconfig) unless explicitly requested.
-14. If requested to DELETE a file, output exactly:
+12. **CRITICAL — node_modules:** Never attempt to manually modify the node_modules directory or mock core libraries using fs.writeFile. If a dependency is missing and npm install is unavailable, report the limitation to the user immediately.
+13. **CRITICAL — File Scope:** Only write or modify files DIRECTLY required by this request.
+14. **CRITICAL:** Do NOT auto-create boilerplate (package.json, README, .gitignore, tsconfig) unless explicitly requested.
+15. If requested to DELETE a file, output exactly:
     ```json
     {
       "tool": "file_delete",

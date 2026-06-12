@@ -236,13 +236,57 @@ async function runExecutor(step, context, args) {
       if (!args.workspaceRoot)
         throw new Error("Tool Execution Failed: No workspace root access.");
 
-      const cmd = step.input.cmd;
-      const cmdArgs = step.input.args;
+      let cmd = step.input.cmd;
+      let cmdArgs = step.input.args || [];
+
+      // Auto-correct wrappers like `cmd.exe /c npm ...` so they don't fail security checks
+      const wrappers = ["cmd", "cmd.exe", "powershell", "powershell.exe", "bash", "sh"];
+      if (wrappers.includes(cmd.toLowerCase()) && cmdArgs.length >= 2) {
+         const flag = cmdArgs[0].toLowerCase();
+         if (flag === "/c" || flag === "-c" || flag === "-command") {
+            cmd = cmdArgs[1];
+            cmdArgs = cmdArgs.slice(2);
+         }
+      }
 
       if (!toolDefinition.allowedCommands.includes(cmd)) {
         throw new Error(
           `SECURITY_VIOLATION: Command '${cmd}' is not in the allowedCommands list for terminal.exec.`,
         );
+      }
+
+      if (cmd === "cd" || cmd === "mkdir") {
+        const targetDir = cmdArgs.length > 0 ? cmdArgs[0] : ".";
+        const fullPath = path.resolve(args.workspaceRoot, step.input.cwd || ".", targetDir);
+        const resolvedRoot = path.resolve(args.workspaceRoot);
+        const relativePath = path.relative(resolvedRoot, fullPath);
+        
+        if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+          throw new Error(`Security Violation: Cannot ${cmd} outside of the workspace directory.`);
+        }
+
+        let stdoutMsg = "";
+        if (cmd === "cd") {
+           stdoutMsg = `Changed directory successfully.\nNOTE: 'cd' is a shell built-in and was simulated. Since terminal execution is stateless, you MUST use the 'cwd' parameter (e.g. "cwd": "${relativePath.replace(/\\/g, "/")}") in all your future terminal.exec tool calls to run commands in this directory.`;
+        } else if (cmd === "mkdir") {
+           const fs = require("fs");
+           if (!fs.existsSync(fullPath)) {
+              fs.mkdirSync(fullPath, { recursive: true });
+              stdoutMsg = `Created directory: ${targetDir}`;
+           } else {
+              stdoutMsg = `Directory already exists: ${targetDir}`;
+           }
+        }
+
+        const res = {
+           success: true,
+           stdout: stdoutMsg,
+           stderr: "",
+           exitCode: 0,
+           durationMs: Date.now() - startTime,
+        };
+        console.log(`[DEBUG] EXECUTOR RESULT (simulated ${cmd}):`, res);
+        return res;
       }
 
       if (args.proposeTerminalCommand) {
@@ -257,12 +301,21 @@ async function runExecutor(step, context, args) {
         if (isWin && cmd === "npm") actualCmd = "npm.cmd";
         if (isWin && cmd === "npx") actualCmd = "npx.cmd";
 
+        // Deep security check: Prevent command injection via shell metacharacters
+        // when shell: true is enabled for .cmd files.
+        const shellMetachars = /[&|<>;`$]/;
+        for (const arg of cmdArgs) {
+          if (shellMetachars.test(arg)) {
+             throw new Error(`SECURITY_VIOLATION: Shell metacharacters are not allowed in terminal arguments: ${arg}`);
+          }
+        }
+
         executionOutput += `\nExecuting tokenized command: ${cmd} ${JSON.stringify(cmdArgs)}`;
 
         await new Promise((resolve, reject) => {
           const child = spawn(actualCmd, cmdArgs, {
             cwd: step.input.cwd ? path.resolve(args.workspaceRoot, step.input.cwd) : args.workspaceRoot,
-            shell: false, // EXPLICITLY DISABLED FOR SECURITY
+            shell: isWin && (actualCmd.endsWith(".cmd") || actualCmd.endsWith(".bat")), // Required by Node 18+ to spawn .cmd files on Windows
           });
 
           let stdout = "";

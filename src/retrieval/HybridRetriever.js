@@ -623,6 +623,15 @@ async function retrieve(query, options = {}) {
     retrievalStatus = 'empty';
   }
 
+  console.log('[HybridRetriever] Final status:', {
+    status: retrievalStatus,
+    results: ranked,
+    context,
+    sources,
+    count: ranked.length,
+    error_reason: errorReason,
+  });
+
   return {
     status: retrievalStatus,
     results: ranked,

@@ -100,6 +100,92 @@ class TaskExecutionRuntime {
         continue;
       }
 
+      // ── File Permission Pause ──────────────────────────────────────────────
+      const writingTools = ['fs.writeFile', 'fs.editFile', 'fs.deleteFile'];
+      if (writingTools.includes(task.step.tool) && !task.approved) {
+        const sess = require('../../memory/shortTerm').getSession(this.args.sessionId);
+        if (sess) {
+            let newCode = "";
+            let originalCode = "";
+            const fs = require('fs');
+            const path = require('path');
+            const fullPath = path.resolve(this.args.workspaceRoot, task.step.input.path);
+            
+            if (fs.existsSync(fullPath)) {
+               originalCode = fs.readFileSync(fullPath, 'utf-8');
+            }
+
+            if (task.step.tool === "fs.writeFile") {
+               newCode = task.step.input.content;
+            } else if (task.step.tool === "fs.editFile") {
+               const lines = originalCode.split("\n");
+               const startIdx = task.step.input.startLine - 1;
+               const endIdx = task.step.input.endLine - 1;
+               if (startIdx >= 0 && endIdx < lines.length && startIdx <= endIdx) {
+                 newCode = [
+                   ...lines.slice(0, startIdx),
+                   task.step.input.replace,
+                   ...lines.slice(endIdx + 1),
+                 ].join("\n");
+               } else {
+                 newCode = originalCode;
+               }
+            }
+
+            sess.messages.push({
+               role: "assistant",
+               content: `Proposed file action: ${task.step.input.path}`,
+               isPlan: false,
+               fileEdits: [
+                 {
+                   filePath: task.step.input.path,
+                   newCode: newCode,
+                   originalCode: originalCode,
+                   isNew: task.step.tool === "fs.writeFile",
+                   isDelete: task.step.tool === "fs.deleteFile",
+                   status: "pending",
+                 },
+               ],
+            });
+            require('../../memory/shortTerm').saveSession(this.args.sessionId, sess);
+            if (this.args.vscodePanel) {
+                this.args.vscodePanel.webview.postMessage({
+                   type: "sessionsLoaded",
+                   sessions: require('../../memory/shortTerm').getAllSessions()
+                });
+                this.args.vscodePanel.webview.postMessage({
+                   type: "reply",
+                   sessionId: this.args.sessionId,
+                   session: sess
+                });
+            }
+        }
+
+        task.approved = true;
+        this.taskQueue.markPaused(task);
+        this.state = RUNTIME_STATE.PAUSED;
+        this._emit({ event: 'RUNTIME_PAUSED', pausedAtStep: task.stepIndex });
+        
+        await this._waitForResume();
+        
+        this.state = RUNTIME_STATE.RUNNING;
+        
+        if (this._resumeActionStatus === "declined") {
+           // Skip execution on decline
+           task.status = TASK_STATUS.COMPLETED;
+           this.taskQueue.markDone(task);
+           this._emitStepDone(task);
+           continue;
+        } else if (this._resumeActionStatus === "accepted") {
+           // The extension.js has ALREADY applied the file write!
+           // Skip execution to avoid redundant writes
+           task.status = TASK_STATUS.COMPLETED;
+           this.taskQueue.markDone(task);
+           this._emitStepDone(task);
+           continue;
+        }
+      }
+
       // ── Save checkpoint BEFORE executing this step ─────────────────────────
       const filesToWatch = this._filesToWatch(task.step);
       task.checkpointId = this.checkpoint.save({
@@ -183,9 +269,11 @@ class TaskExecutionRuntime {
   /**
    * Resume a paused runtime.
    * @param {Object[]} [modifiedSteps]  optional replacement for remaining queue
+   * @param {string} [actionStatus]     "accepted" or "declined"
    */
-  resume(modifiedSteps) {
+  resume(modifiedSteps, actionStatus) {
     this._pauseSignal = false;
+    this._resumeActionStatus = actionStatus;
     if (modifiedSteps && modifiedSteps.length > 0) {
       // Replace remaining pending steps with the user's edits
       const pendingIds = this.taskQueue.queue

@@ -98,7 +98,7 @@ Be highly efficient, direct, and concise. Avoid conversational fluff unless nece
   }
 
   console.log(
-    `[Jarvix OS] Requesting provider=${selectedProvider} model=${selectedModel}`,
+    `[Jarvix] Requesting provider=${selectedProvider} model=${selectedModel}`,
   );
 
   const abortController = new AbortController();
@@ -120,10 +120,10 @@ Be highly efficient, direct, and concise. Avoid conversational fluff unless nece
     });
   } catch (err) {
     if (axios.isCancel(err)) {
-      console.log("[Jarvix OS] Upstream request was aborted successfully.");
+      console.log("[Jarvix] Upstream request was aborted successfully.");
       return res.end();
     }
-    console.error(`[Jarvix OS] Provider fetch failed:`, err.message);
+    console.error(`[Jarvix] Provider fetch failed:`, err.message);
     if (err.response && err.response.data) {
       return res
         .status(err.response.status || 500)

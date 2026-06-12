@@ -6,13 +6,13 @@
 
 const TOOL_REGISTRY = {
   "terminal.exec": {
-    description: "Run safe CLI commands. You must provide the base command and an array of arguments.",
+    description: "Run safe CLI commands. You must provide the base command and an array of arguments. NEVER wrap commands in 'cmd.exe', 'powershell', or 'bash'. Just use the base command directly (e.g., cmd='npm', args=['init', '-y']).",
     schema: {
       cmd: "string", // Must be one of allowedCommands
       args: "array", // Array of string arguments
       cwd: "string?", // Optional relative path to run the command in
     },
-    allowedCommands: ["npm", "node", "git", "npx"],
+    allowedCommands: ["npm", "node", "git", "npx", "cd", "mkdir"],
     risk: "medium",
   },
   "fs.writeFile": {
