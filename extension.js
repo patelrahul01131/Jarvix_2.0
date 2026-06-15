@@ -151,7 +151,7 @@ async function writeAndSync(filePath, code, panel) {
     (d) =>
       !d.isClosed &&
       d.fileName.toLowerCase().replace(/\\/g, "/") ===
-      absolutePath.toLowerCase().replace(/\\/g, "/"),
+        absolutePath.toLowerCase().replace(/\\/g, "/"),
   );
 
   if (openDoc) {
@@ -206,17 +206,27 @@ function activate(context) {
             model: msg.model,
             provider: msg.provider,
             signal: activeAbortController.signal,
-            onStatus: (status) => panel.webview.postMessage({ type: "status", status }),
+            onStatus: (status) =>
+              panel.webview.postMessage({ type: "status", status }),
             onState: (stateUpdate) => {
               const safeUpdate = { ...stateUpdate };
               delete safeUpdate._runtime;
               panel.webview.postMessage({ type: "AGENT_STATE", ...safeUpdate });
             },
-            onChunk: (partialReply) => panel.webview.postMessage({ type: "partialReply", sessionId: msg.sessionId, content: partialReply }),
+            onChunk: (partialReply) =>
+              panel.webview.postMessage({
+                type: "partialReply",
+                sessionId: msg.sessionId,
+                content: partialReply,
+              }),
             onFileWrite: async ({ filePath, code, isNew }) => {
               try {
                 await writeAndSync(filePath, code, panel);
-                panel.webview.postMessage({ type: "fileAutoWritten", filePath, isNew });
+                panel.webview.postMessage({
+                  type: "fileAutoWritten",
+                  filePath,
+                  isNew,
+                });
               } catch (e) {}
             },
           });
@@ -225,8 +235,15 @@ function activate(context) {
           vscode.window.showErrorMessage("Jarvix error: " + err.message);
         } finally {
           activeAbortController = null;
-          panel.webview.postMessage({ type: "sessionsLoaded", sessions: getAllSessions() });
-          panel.webview.postMessage({ type: "reply", sessionId: msg.sessionId, session: getAllSessions()[msg.sessionId] });
+          panel.webview.postMessage({
+            type: "sessionsLoaded",
+            sessions: getAllSessions(),
+          });
+          panel.webview.postMessage({
+            type: "reply",
+            sessionId: msg.sessionId,
+            session: getAllSessions()[msg.sessionId],
+          });
         }
       }
 
@@ -626,7 +643,9 @@ function activate(context) {
               sessions: getAllSessions(),
             });
           } else {
-            await resumeAgentFallback("File action declined. Re-plan and proceed.");
+            await resumeAgentFallback(
+              "File action declined. Re-plan and proceed.",
+            );
           }
           break;
         }
@@ -895,7 +914,9 @@ function activate(context) {
               sessions: getAllSessions(),
             });
           } else {
-            await resumeAgentFallback("Terminal command declined. Re-plan and proceed.");
+            await resumeAgentFallback(
+              "Terminal command declined. Re-plan and proceed.",
+            );
           }
           break;
         }
@@ -933,12 +954,23 @@ function activate(context) {
               ? `Proposed New File: ${msg.filePath}`
               : `Proposed Edit: ${msg.filePath}`;
 
-            vscode.commands.executeCommand(
-              "vscode.diff",
-              vscode.Uri.file(tempOriginal),
-              vscode.Uri.file(tempProposed),
-              title,
-            );
+            console.log("tempOriginal: ", tempOriginal);
+            console.log("tempProposed: ", tempProposed);
+            console.log("title: ", title);
+
+            if (isNew) {
+              vscode.commands.executeCommand(
+                "vscode.open",
+                vscode.Uri.file(tempProposed)
+              );
+            } else {
+              vscode.commands.executeCommand(
+                "vscode.diff",
+                vscode.Uri.file(tempOriginal),
+                vscode.Uri.file(tempProposed),
+                title
+              );
+            }
           } catch (err) {
             vscode.window.showErrorMessage(
               "Failed to open diff: " + err.message,

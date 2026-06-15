@@ -217,7 +217,17 @@ ${registryDescriptions}
     }
 
     // --- Phase 5 & 7: Goal Priority & OS-Boundary Filter ---
-    actionPolicy += `\n\n[OS-BOUNDARY FILTER] 
+    const os = require('os');
+    const osEnv = `You are running on ${os.platform()} (${os.type()} ${os.release()}).`;
+
+    actionPolicy += `\n\n[OS & ENVIRONMENT]
+${osEnv}
+CRITICAL VFS RULE: You must interact with the file system using the provided Virtual File System (VFS) tools (fs.createDirectory, fs.writeFile, fs.editFile, etc.).
+- Do NOT use terminal.exec for file management (e.g., mkdir, rm, mv, cp, ls). These commands are strictly blocked.
+- To create a project, use 'scaffold_project'.
+- To manage npm dependencies, use 'npm_manager'.
+
+[OS-BOUNDARY FILTER] 
 CRITICAL RULE: You are a coding-only executor inside a workspace sandbox, NOT a DevOps administrator or OS repair agent.
 - NEVER attempt to install system dependencies (like Node, npm, git).
 - NEVER attempt to modify system PATH or write scripts to probe the host operating system.
@@ -301,11 +311,7 @@ Your output must conform to this schema:
       { provider: "gemini", model: "gemini-2.5-flash" },
       {
         provider: "openrouter",
-        model: "qwen/qwen-2.5-coder-32b-instruct:free",
-      },
-      {
-        provider: "openrouter",
-        model: "google/gemini-2.0-flash-lite-preview-02-05:free",
+        model: "openai/gpt-oss-120b:free",
       },
       {
         provider: "mistral",

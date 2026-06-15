@@ -115,7 +115,7 @@ class TaskExecutionRuntime {
 
       // ── File Permission Pause ──────────────────────────────────────────────
       const writingTools = ['fs.writeFile', 'fs.editFile', 'fs.deleteFile'];
-      if (writingTools.includes(task.step.tool) && !task.approved) {
+      if (writingTools.includes(task.step.tool) && !task.approved && !this.args.autoExecute) {
         // Batch contiguous file writes
         const batchedTasks = [task];
         let peekIndex = 0;
@@ -153,8 +153,12 @@ class TaskExecutionRuntime {
                 } else if (bTask.step.tool === "fs.editFile") {
                    const lines = originalCode.split("\n");
                    const startIdx = bTask.step.input.startLine - 1;
-                   const endIdx = bTask.step.input.endLine - 1;
-                   if (startIdx >= 0 && endIdx < lines.length && startIdx <= endIdx) {
+                   let endIdx = bTask.step.input.endLine - 1;
+                   
+                   // Clamp endIdx to file length to prevent silent failures
+                   if (endIdx >= lines.length) endIdx = lines.length - 1;
+
+                   if (startIdx >= 0 && startIdx <= endIdx) {
                      newCode = [
                        ...lines.slice(0, startIdx),
                        bTask.step.input.replace,

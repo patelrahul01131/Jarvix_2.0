@@ -48,6 +48,14 @@ async function runReflection(state, args) {
     };
   }
 
+  // 1.5 Deterministic Validation Failure
+  if (errorText.includes("Pre-execution validation failed")) {
+    return {
+       reflection: { decision: "REPLAN", reason: "VALIDATION_FAILED", details: "Plan failed schema/execution validation. Must fix the plan schema." },
+       status: "DONE"
+    };
+  }
+
   // 2. Deterministic Execution Rules
   if (obs.exitCode === 0 && obs.success !== false) {
     if (action.tool === "fs.readFile" || action.tool === "fs.writeFile" || action.tool === "fs.editFile") {

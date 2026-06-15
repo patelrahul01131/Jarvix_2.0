@@ -24,9 +24,15 @@ async function runValidator(state, args) {
     if (tool === "fs.writeFile" && input.path) {
       simulatedFiles.add(path.resolve(args.workspaceRoot, input.path));
     }
+    if (tool === "terminal.exec" && input.cmd === "mkdir" && input.args) {
+      // Very rough simulation of mkdir to unblock subsequent writes into the new dir
+      for (const arg of input.args) {
+         if (!arg.startsWith("-")) simulatedFiles.add(path.resolve(args.workspaceRoot, input.cwd || ".", arg));
+      }
+    }
 
     // 1. Pre-flight checks for file existence
-    if (tool === "fs.readFile" || tool === "fs.editFile" || tool === "fs.deleteFile") {
+    if (tool === "fs.readFile" || tool === "fs.editFile" || tool === "fs.deleteFile" || tool === "fs.renameFile") {
       if (input.path) {
         const fullPath = path.resolve(args.workspaceRoot, input.path);
         if (!fs.existsSync(fullPath) && !simulatedFiles.has(fullPath)) {
@@ -35,25 +41,29 @@ async function runValidator(state, args) {
       }
     }
 
-    // 2. Validate line ranges for fs.editFile
+    // 2. Validate target/replacement for fs.editFile
     if (tool === "fs.editFile" && input.path) {
       const fullPath = path.resolve(args.workspaceRoot, input.path);
       if (fs.existsSync(fullPath) && !simulatedFiles.has(fullPath)) {
-        if (typeof input.startLine !== "number" || typeof input.endLine !== "number") {
-          validationErrors.push(`Step ${i+1} (${tool}): 'startLine' and 'endLine' arguments must be numbers`);
+        if (typeof input.target !== "string" || typeof input.replacement !== "string") {
+          validationErrors.push(`Step ${i+1} (${tool}): 'target' and 'replacement' arguments must be strings`);
         } else {
           const originalCode = fs.readFileSync(fullPath, "utf-8");
-          const lines = originalCode.split("\n");
-          const startIdx = input.startLine - 1;
-          const endIdx = input.endLine - 1;
-          if (startIdx < 0 || endIdx >= lines.length || startIdx > endIdx) {
+          if (!originalCode.includes(input.target)) {
             validationErrors.push(
-              `Step ${i+1} (${tool}): Invalid line range ${input.startLine}-${input.endLine}. File '${input.path}' has ${lines.length} lines.`
+              `Step ${i+1} (${tool}): Target string not found in file '${input.path}'. Ensure it exactly matches existing code.`
             );
           }
         }
       }
     }
+  }
+
+  // 3. Prevent mixing file writes and terminal commands in the same plan
+  const hasFileMod = steps.some(s => s.tool === "fs.writeFile" || s.tool === "fs.editFile");
+  const hasTerminal = steps.some(s => s.tool === "terminal.exec");
+  if (hasFileMod && hasTerminal) {
+    validationErrors.push("Plan Rejected: You cannot schedule 'terminal.exec' in the same plan as 'fs.writeFile' or 'fs.editFile'. File modifications require asynchronous user approval before they exist on disk. Plan the file writes first, and wait for them to complete before running commands.");
   }
 
   if (validationErrors.length > 0) {
