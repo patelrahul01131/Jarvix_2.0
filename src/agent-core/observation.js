@@ -10,7 +10,7 @@ function buildObservation(state, execRes) {
   // Basic deterministic observation structure
   const observation = {
     tool: tool,
-    exitCode: undefined,
+    exitCode: execRes.exitCode !== undefined ? execRes.exitCode : (execRes.success === false ? 1 : 0),
     stdout: execRes.stdout || "",
     stderr: execRes.stderr || "",
     durationMs: execRes.durationMs || 0,
@@ -20,17 +20,6 @@ function buildObservation(state, execRes) {
     processStarted: null,
     success: execRes.success !== false
   };
-
-  // Enhance observation based on specific tool outputs
-  if (tool === "shell.exec" || tool === "terminal.exec") {
-    // If the executor provides an explicit exit code, use it.
-    // Otherwise, try to infer it from the success flag or stderr presence.
-    if (execRes.exitCode !== undefined) {
-      observation.exitCode = execRes.exitCode;
-    } else {
-      observation.exitCode = execRes.success === false ? 1 : 0;
-    }
-  }
 
   if (tool === "fs.writeFile" && execRes.success !== false) {
     observation.filesCreated.push(state.action.input?.path);

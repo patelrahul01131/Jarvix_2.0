@@ -192,6 +192,67 @@ async function runExecutor(step, context, args) {
           "Tool Execution Failed: No workspace file writer access.",
         );
       }
+    } else if (toolName === "fs.editFileLines") {
+      if (
+        !step.input ||
+        typeof step.input.path !== "string" ||
+        typeof step.input.newCode !== "string" ||
+        typeof step.input.startLine !== "number" ||
+        typeof step.input.endLine !== "number"
+      ) {
+        throw new Error(
+          "Tool Execution Failed: 'path', 'newCode', 'startLine', and 'endLine' arguments must be provided.",
+        );
+      }
+
+      const fs = require("fs");
+      const path = require("path");
+
+      if (!args.workspaceRoot) {
+        throw new Error("Tool Execution Failed: No workspace root access.");
+      }
+
+      const fullPath = path.resolve(args.workspaceRoot, step.input.path);
+      const resolvedRoot = path.resolve(args.workspaceRoot);
+      const relativePath = path.relative(resolvedRoot, fullPath);
+      if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+        throw new Error(
+          "Security Violation: Cannot write files outside of the workspace directory.",
+        );
+      }
+
+      if (!fs.existsSync(fullPath)) {
+        throw new Error(`File not found: ${step.input.path}`);
+      }
+
+      const originalCode = fs.readFileSync(fullPath, "utf-8");
+      const lines = originalCode.split('\n');
+      const start = Math.max(0, step.input.startLine - 1);
+      const end = Math.min(lines.length, step.input.endLine);
+      const replacementLines = step.input.newCode.split('\n');
+      lines.splice(start, end - start, ...replacementLines);
+      const content = lines.join('\n');
+
+      if (args.proposeFileWrite && !context.autoExecute) {
+        args.proposeFileWrite({
+          filePath: step.input.path,
+          code: content,
+          isNew: false,
+          originalCode: originalCode,
+        });
+        executionOutput += `\nProposed file edit: ${step.input.path}`;
+      } else if (args.onFileWrite) {
+        await args.onFileWrite({
+          filePath: step.input.path,
+          code: content,
+          isNew: false,
+        });
+        executionOutput += `\nEdited file: ${step.input.path}`;
+      } else {
+        throw new Error(
+          "Tool Execution Failed: No workspace file writer access.",
+        );
+      }
     } else if (toolName === "fs.deleteFile") {
       if (!step.input || typeof step.input.path !== "string") {
         throw new Error(
@@ -312,18 +373,18 @@ async function runExecutor(step, context, args) {
         }
       }
 
-      const destructiveCommands = [
-        "rm",
-        "rmdir",
-        "del",
-        "erase",
-        "format",
-        "dd",
-        "sudo",
+      const destructivePatterns = [
+        /(^|\s)rm\s+-r/i,
+        /(^|\s)del\s+\/s/i,
+        /(^|\s)rmdir\s+\/s/i,
+        /(^|\s)format\s+/i,
+        /(^|\s)dd\s+if=/i,
+        /(^|\s)sudo\s+/i,
       ];
-      if (destructiveCommands.includes(cmd.toLowerCase())) {
+      const fullCmdString = `${cmd} ${cmdArgs.join(" ")}`;
+      if (destructivePatterns.some((p) => p.test(fullCmdString))) {
         throw new Error(
-          "SECURITY_VIOLATION: Destructive operations require explicit user confirmation in a separate step. Do not execute this command directly.",
+          "SECURITY_VIOLATION: Destructive operations are strictly blocked by the execution infrastructure.",
         );
       }
 
@@ -430,6 +491,7 @@ async function runExecutor(step, context, args) {
             shell:
               isWin &&
               (actualCmd.endsWith(".cmd") || actualCmd.endsWith(".bat")), // Required by Node 18+ to spawn .cmd files on Windows
+            timeout: 30000, // 30 second hard timeout
           });
 
           let stdout = "";
@@ -623,7 +685,8 @@ async function runExecutor(step, context, args) {
         });
       });
     } else if (toolName === "response") {
-      if (onChunk) onChunk(`\n${step.input.message}\n\n`);
+      const responseText = step.input.content !== undefined ? step.input.content : step.input.message;
+      if (onChunk) onChunk(`\n${responseText}\n\n`);
       executionOutput += `\nResponded to user.`;
     }
 

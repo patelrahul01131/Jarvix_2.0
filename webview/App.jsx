@@ -83,6 +83,7 @@ export default function App() {
             onSend={store.handleSend}
             onStop={store.handleStop}
             isLoading={store.isLoading}
+            agentStatus={activeSession?.agentStatus}
             workspaceFiles={store.workspaceFiles}
           />
         </div>

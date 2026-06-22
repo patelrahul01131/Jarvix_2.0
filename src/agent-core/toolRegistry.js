@@ -47,14 +47,16 @@ const TOOL_REGISTRY = {
     },
     risk: "low",
   },
-  "fs.editFile": {
-    description: "Edit an existing file.",
+
+  "fs.editFileLines": {
+    description: "Edit an existing file by replacing a specific range of lines. Line numbers are 1-indexed. newCode will replace all lines from startLine to endLine inclusive.",
     schema: {
       path: "string",
-      target: "string",
-      replacement: "string",
+      startLine: "number",
+      endLine: "number",
+      newCode: "string"
     },
-    risk: "low",
+    risk: "low"
   },
   "fs.deleteFile": {
     description: "Delete an existing file or directory.",

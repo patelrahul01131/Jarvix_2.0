@@ -14,7 +14,7 @@ router.post("/state", (req, res) => {
   try {
     const { sessionId, state } = req.body;
     // Update to use the new Memory layer
-    const shortTerm = require("../memory/shortTerm.js"); 
+    const shortTerm = require("../memory/shortTerm.js");
     const session = shortTerm.getSession(sessionId);
     if (session) {
       session.stateSnapshot = state; // Or whatever property the state is saved as
@@ -40,19 +40,43 @@ router.post("/chat", async (req, res) => {
 
     // Call the bridge to stream response back
     await streamChatCompletion(
-      req, 
-      res, 
-      messages, 
-      system, 
-      selectedModel, 
-      selectedProvider
+      req,
+      res,
+      messages,
+      system,
+      selectedModel,
+      selectedProvider,
     );
-
   } catch (err) {
     console.error("[Jarvix OS] Route error:", err);
     if (!res.headersSent) {
       res.status(500).json({ error: err.message });
     }
+  }
+});
+
+router.post("/feedback", async (req, res) => {
+  try {
+    const { traceId, value, name, comment } = req.body;
+    if (!traceId) {
+      return res.status(400).json({ error: "Missing traceId" });
+    }
+
+    const { langfuse } = require("../agent-core/langfuseClient");
+
+    // value should be a number, e.g., 1 for thumbs up, 0 for thumbs down
+    langfuse.score({
+      traceId,
+      name: name || "user-feedback",
+      value: value,
+      comment: comment,
+    });
+
+    // Langfuse score is asynchronous, we can just return success immediately
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[Jarvix OS] Feedback route error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 

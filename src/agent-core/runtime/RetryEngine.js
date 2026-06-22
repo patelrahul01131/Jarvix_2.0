@@ -161,8 +161,12 @@ Output ONLY valid JSON matching the original step schema. No explanation.`;
         onChunk: c => { raw += c; },
       });
 
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (match) return JSON.parse(match[0]);
+      let cleanJson = raw.replace(/```json/g, "").replace(/```/g, "").trim();
+      const startIdx = cleanJson.indexOf("{");
+      const endIdx = cleanJson.lastIndexOf("}");
+      if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+        return JSON.parse(cleanJson.substring(startIdx, endIdx + 1));
+      }
     } catch (e) {
       console.warn('[RetryEngine] Self-correct LLM call failed:', e.message);
     }
@@ -199,8 +203,12 @@ Output ONLY a valid JSON step object. No markdown fences.`;
         onChunk: c => { raw += c; },
       });
 
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (match) return JSON.parse(match[0]);
+      let cleanJson = raw.replace(/```json/g, "").replace(/```/g, "").trim();
+      const startIdx = cleanJson.indexOf("{");
+      const endIdx = cleanJson.lastIndexOf("}");
+      if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+        return JSON.parse(cleanJson.substring(startIdx, endIdx + 1));
+      }
     } catch (e) {
       console.warn('[RetryEngine] Alternative strategy LLM call failed:', e.message);
     }

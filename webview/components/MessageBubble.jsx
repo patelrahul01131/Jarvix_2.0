@@ -467,50 +467,43 @@ export default function MessageBubble({
           <MarkdownRenderer content={message.content} isStreaming={isStreaming} />
         )}
 
-        {/* File edits */}
-        {isAssistant && message.fileEdits && message.fileEdits.length > 0 && (
+        {/* Resolved File edits */}
+        {isAssistant && message.fileEdits && message.fileEdits.filter(e => e.status !== 'pending').length > 0 && (
           <div className="file-edits-container">
             <div className="file-edits-header">
-              <div className="file-edits-label">File Changes</div>
-              {message.fileEdits.some(e => e.status === 'pending') && (
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  <button className="batch-btn accept" onClick={() => store.handleAcceptAllFiles(messageIndex)}>
-                    Accept All
-                  </button>
-                  <button className="batch-btn decline" onClick={() => store.handleDeclineAllFiles(messageIndex)}>
-                    Decline All
-                  </button>
-                </div>
-              )}
+              <div className="file-edits-label">Resolved File Changes</div>
             </div>
-            {message.fileEdits.map((edit, idx) => (
-              <div 
-                key={idx} 
-                className="artifact-card diff" 
-                onClick={() => store.setActiveWorkspaceView({ type: 'diff', messageIndex, fileIndex: idx })}
-              >
-                <div className="artifact-icon">📄</div>
-                <div className="artifact-info">
-                  <div className="artifact-title">{(edit.filePath || edit.path || '').split(/[/\\]/).pop() || '(unnamed)'}</div>
-                  <div className="artifact-status" style={{ color: edit.status === 'pending' ? 'var(--warning)' : edit.status === 'accepted' ? 'var(--success)' : 'var(--danger)' }}>
-                    {edit.status}
+            {message.fileEdits.map((edit, idx) => {
+              if (edit.status === 'pending') return null;
+              return (
+                <div 
+                  key={idx} 
+                  className="artifact-card diff" 
+                  onClick={() => store.setActiveWorkspaceView({ type: 'diff', messageIndex, fileIndex: idx })}
+                >
+                  <div className="artifact-icon">📄</div>
+                  <div className="artifact-info">
+                    <div className="artifact-title">{(edit.filePath || edit.path || '').split(/[/\\]/).pop() || '(unnamed)'}</div>
+                    <div className="artifact-status" style={{ color: edit.status === 'accepted' ? 'var(--success)' : 'var(--danger)' }}>
+                      {edit.status}
+                    </div>
                   </div>
+                  {edit.status === 'declined' && store.handleUndoDeclineFile && (
+                    <button 
+                      className="batch-btn accept" 
+                      style={{ marginLeft: 'auto', marginRight: '10px' }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        store.handleUndoDeclineFile(messageIndex, idx);
+                      }}
+                    >
+                      ↩ Undo
+                    </button>
+                  )}
+                  <div className="artifact-arrow">→</div>
                 </div>
-                {edit.status === 'declined' && store.handleUndoDeclineFile && (
-                  <button 
-                    className="batch-btn accept" 
-                    style={{ marginLeft: 'auto', marginRight: '10px' }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      store.handleUndoDeclineFile(messageIndex, idx);
-                    }}
-                  >
-                    ↩ Undo
-                  </button>
-                )}
-                <div className="artifact-arrow">→</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 

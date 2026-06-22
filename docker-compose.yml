@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: jarvix-langfuse
+    ports:
+      - "3000:3000"
+    # This allows the container to talk to your local machine (Windows/Mac)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - NODE_ENV=production
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=rahul-secret-key-123
+      - SALT=patel-salt-123
+      # Note: 'host.docker.internal' points to your local machine's Postgres
+      - DATABASE_URL=postgresql://postgres:123456789@host.docker.internal:5432/langfuse
+      - TELEMETRY_ENABLED=false
+
+  jarvix:
+    build: .
+    container_name: jarvix-app
+    depends_on:
+      - langfuse
+    ports:
+      - "3131:3131"
+    # Load keys from your .env file
+    env_file:
+      - .env
+    environment:
+      # Use the service name 'langfuse' for internal communication
+      - LANGFUSE_HOST=http://langfuse:3000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

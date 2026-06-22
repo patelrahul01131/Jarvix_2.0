@@ -133,6 +133,43 @@ function writeFileToWorkspace(filePath, content) {
   return fullPath;
 }
 
+function editFileLinesWorkspace(filePath, startLine, endLine, newCode) {
+  const root = getWorkspaceRoot();
+  if (!root) throw new Error("No workspace folder open.");
+  const fullPath = path.isAbsolute(filePath)
+    ? filePath
+    : path.join(root, filePath);
+
+  if (!fullPath.toLowerCase().startsWith(path.resolve(root).toLowerCase())) {
+    throw new Error(
+      "Security Violation: Cannot write files outside the workspace directory.",
+    );
+  }
+
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`File not found: ${fullPath}`);
+  }
+
+  const content = fs.readFileSync(fullPath, "utf8");
+  const lines = content.split('\n');
+  
+  if (startLine < 1 || startLine > lines.length || endLine < startLine) {
+    throw new Error(`Invalid line range: ${startLine}-${endLine}. File has ${lines.length} lines.`);
+  }
+
+  // 1-indexed to 0-indexed
+  const startIdx = startLine - 1;
+  const deleteCount = endLine - startLine + 1;
+  
+  // Splice out the old lines and insert the new lines
+  const newLines = newCode.split('\n');
+  lines.splice(startIdx, deleteCount, ...newLines);
+  
+  const updatedContent = lines.join('\n');
+  fs.writeFileSync(fullPath, updatedContent, "utf8");
+  return fullPath;
+}
+
 function fileExistsInWorkspace(filePath) {
   const root = getWorkspaceRoot();
   if (!root) return false;
@@ -196,6 +233,20 @@ function executeWriteFile(params) {
   }
 }
 
+function executeEditFileLines(params) {
+  try {
+    const writtenPath = editFileLinesWorkspace(params.filePath, params.startLine, params.endLine, params.newCode);
+    return {
+      success: true,
+      stdout: `Successfully edited lines ${params.startLine}-${params.endLine} in ${writtenPath}`,
+      stderr: "",
+      exitCode: 0,
+    };
+  } catch (err) {
+    return { success: false, stdout: "", stderr: err.message, exitCode: 1 };
+  }
+}
+
 module.exports = {
   getWorkspaceRoot,
   listWorkspaceFiles,
@@ -206,4 +257,5 @@ module.exports = {
   getLanguageFromExt,
   executeReadFile,
   executeWriteFile,
+  executeEditFileLines,
 };

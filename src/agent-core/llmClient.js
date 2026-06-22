@@ -4,9 +4,22 @@
  */
 
 const axios = require("axios");
+const { traceStorage } = require("./langfuseClient");
+
 const BRIDGE_URL = "http://127.0.0.1:3131/chat";
 
 async function callLLM({ messages, system, model, provider, onChunk, signal }) {
+  const trace = traceStorage.getStore();
+  let generation = null;
+  if (trace) {
+    generation = trace.generation({
+      name: "llm-completion",
+      model: model || "unknown",
+      modelParameters: { provider },
+      messages: [{ role: "system", content: system }, ...(messages || [])],
+    });
+  }
+
   return new Promise((resolve, reject) => {
     axios
       .post(
@@ -17,7 +30,7 @@ async function callLLM({ messages, system, model, provider, onChunk, signal }) {
           maxBodyLength: Infinity,
           maxContentLength: Infinity,
           signal,
-        }
+        },
       )
       .then((response) => {
         let buffer = "";
@@ -45,30 +58,74 @@ async function callLLM({ messages, system, model, provider, onChunk, signal }) {
           }
         });
 
-        response.data.on("end", () => resolve({ reply, tokenUsage }));
+        response.data.on("end", () => {
+          if (generation) {
+            generation.end({
+              output: reply,
+              usage: tokenUsage
+                ? {
+                    promptTokens: tokenUsage.prompt_tokens,
+                    completionTokens: tokenUsage.completion_tokens,
+                    totalTokens: tokenUsage.total_tokens,
+                  }
+                : undefined,
+            });
+          }
+          resolve({ reply, tokenUsage });
+        });
 
         response.data.on("error", (err) => {
+          if (generation) {
+            generation.end({ level: "ERROR", statusMessage: err.message });
+          }
           reject(new Error(`Stream error: ${err.message}`));
         });
       })
       .catch((err) => {
-        if (axios.isCancel(err) || err.name === "AbortError" || err.code === "ERR_CANCELED") {
-          reject(Object.assign(new Error("Generation aborted"), { name: "AbortError" }));
+        if (
+          axios.isCancel(err) ||
+          err.name === "AbortError" ||
+          err.code === "ERR_CANCELED"
+        ) {
+          reject(
+            Object.assign(new Error("Generation aborted"), {
+              name: "AbortError",
+            }),
+          );
           return;
         }
-        
-        if (err.response && err.response.data && typeof err.response.data.on === 'function') {
+
+        if (
+          err.response &&
+          err.response.data &&
+          typeof err.response.data.on === "function"
+        ) {
           let errBody = "";
-          err.response.data.on("data", chunk => errBody += chunk.toString());
+          err.response.data.on(
+            "data",
+            (chunk) => (errBody += chunk.toString()),
+          );
           err.response.data.on("end", () => {
             try {
               const json = JSON.parse(errBody);
+              if (generation)
+                generation.end({
+                  level: "ERROR",
+                  statusMessage: json.error || err.message,
+                });
               reject(new Error(json.error || err.message));
             } catch (e) {
+              if (generation)
+                generation.end({
+                  level: "ERROR",
+                  statusMessage: errBody || err.message,
+                });
               reject(new Error(errBody || err.message));
             }
           });
         } else {
+          if (generation)
+            generation.end({ level: "ERROR", statusMessage: err.message });
           reject(err);
         }
       });

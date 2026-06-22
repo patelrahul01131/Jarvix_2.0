@@ -614,7 +614,15 @@ function activate(context) {
                 sessions: getAllSessions(),
               });
             } else {
-              await resumeAgentFallback("File action applied. Proceed.");
+              panel.webview.postMessage({
+                type: "sessionsLoaded",
+                sessions: getAllSessions(),
+              });
+              panel.webview.postMessage({
+                type: "reply",
+                sessionId: msg.sessionId,
+                session: getAllSessions()[msg.sessionId],
+              });
             }
           } catch (err) {
             vscode.window.showErrorMessage("Action error: " + err.message);
@@ -643,9 +651,15 @@ function activate(context) {
               sessions: getAllSessions(),
             });
           } else {
-            await resumeAgentFallback(
-              "File action declined. Re-plan and proceed.",
-            );
+            panel.webview.postMessage({
+              type: "sessionsLoaded",
+              sessions: getAllSessions(),
+            });
+            panel.webview.postMessage({
+              type: "reply",
+              sessionId: msg.sessionId,
+              session: getAllSessions()[msg.sessionId],
+            });
           }
           break;
         }
@@ -961,14 +975,14 @@ function activate(context) {
             if (isNew) {
               vscode.commands.executeCommand(
                 "vscode.open",
-                vscode.Uri.file(tempProposed)
+                vscode.Uri.file(tempProposed),
               );
             } else {
               vscode.commands.executeCommand(
                 "vscode.diff",
                 vscode.Uri.file(tempOriginal),
                 vscode.Uri.file(tempProposed),
-                title
+                title,
               );
             }
           } catch (err) {

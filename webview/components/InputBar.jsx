@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 
+import PendingConsentBar from './PendingConsentBar';
+import DynamicLoadingBar from './DynamicLoadingBar';
+
 const MAX_CHARS = 10000;
 
-export default function InputBar({ onSend, onStop, isLoading, workspaceFiles = [] }) {
+export default function InputBar({ onSend, onStop, isLoading, agentStatus, workspaceFiles = [] }) {
   const [text, setText] = useState('');
   const [attachedFiles, setAttachedFiles] = useState([]); // { path: string, name: string }
   const [attachedImages, setAttachedImages] = useState([]); // { name, base64, mimeType }
@@ -170,6 +173,9 @@ export default function InputBar({ onSend, onStop, isLoading, workspaceFiles = [
       onDrop={handleDrop}
       onDragOver={handleDragOver}
     >
+      <PendingConsentBar />
+      <DynamicLoadingBar isLoading={isLoading} agentStatus={agentStatus} />
+      
       {/* Attachment pills (files) */}
       {attachedFiles.length > 0 && (
         <div className="attachment-pills">
