@@ -41,7 +41,8 @@ async function runReflection(state, args) {
 
   // 1. Tool Capability Mismatch Detector
   const errorText = (obs.stderr || "") + (state.lastResult?.error || "");
-  if (errorText.includes("allowedCommands") || errorText.includes("SECURITY_VIOLATION")) {
+  const errLowerText = errorText.toLowerCase();
+  if (errLowerText.includes("allowedcommands") || errLowerText.includes("security_violation") || errLowerText.includes("security violation")) {
     return { 
        reflection: { decision: "REPLAN", reason: "TOOL_CAPABILITY_MISMATCH", details: "Planner attempted to use an unapproved command or tool context." },
        status: "DONE" 
@@ -83,7 +84,7 @@ async function runReflection(state, args) {
   }
 
   // Replan errors (fixable by different approach)
-  if (errLower.includes("enoent") || errLower.includes("no such file") || errLower.includes("directory not found")) {
+  if (errLower.includes("enoent") || errLower.includes("no such file") || errLower.includes("directory not found") || errLower.includes("file not found")) {
     return { reflection: { decision: "REPLAN", reason: "PATH_MISSING" }, status: "DONE" };
   }
   
@@ -107,23 +108,38 @@ async function runReflection(state, args) {
     try {
       const messages = [{
         role: "user",
-        content: `ACTION: ${JSON.stringify(action)}\n\nOBSERVATION: ${JSON.stringify(obs)}\n\nDetermine the next step: CONTINUE, RETRY, REPLAN, or ASK_USER. Output strictly JSON: {"decision": "...", "reason": "..."}`
+        content: `ACTION: ${JSON.stringify(action)}\n\nOBSERVATION: ${JSON.stringify(obs)}\n\nDetermine the next step: CONTINUE, RETRY, REPLAN, or ASK_USER. Output strictly JSON: {"decision": "...", "reason": "..."}. Escape all newlines in strings as \\n.`
       }];
       
       const { reply } = await callLLM({
         messages,
-        system: "You are a reflection engine. Output strictly valid JSON. Example: {\"decision\": \"REPLAN\", \"reason\": \"Syntax error on line 42\"}",
+        system: "You are a reflection engine. Output strictly valid JSON. Escape all newlines in strings as \\n. Example: {\"decision\": \"REPLAN\", \"reason\": \"Syntax error on line 42\"}",
         model: args.model,
         provider: args.provider,
         onChunk: null,
         signal: args.signal
       });
 
-      const match = reply.match(/\{[\s\S]*\}/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        if (["CONTINUE", "RETRY", "REPLAN", "ASK_USER"].includes(parsed.decision)) {
-           return { reflection: parsed, status: "DONE" };
+      let cleanJson = reply.trim();
+      let startIndex = cleanJson.indexOf('{');
+      if (startIndex !== -1) {
+        let braceCount = 0;
+        let endIndex = -1;
+        for (let i = startIndex; i < cleanJson.length; i++) {
+          if (cleanJson[i] === '{') braceCount++;
+          else if (cleanJson[i] === '}') braceCount--;
+          
+          if (braceCount === 0) {
+            endIndex = i;
+            break;
+          }
+        }
+        if (endIndex !== -1) {
+          cleanJson = cleanJson.substring(startIndex, endIndex + 1);
+          const parsed = JSON.parse(cleanJson);
+          if (["CONTINUE", "RETRY", "REPLAN", "ASK_USER"].includes(parsed.decision)) {
+             return { reflection: parsed, status: "DONE" };
+          }
         }
       }
     } catch (e) {
@@ -131,7 +147,7 @@ async function runReflection(state, args) {
     }
     
     // Ultimate fallback if parsing fails
-    return { reflection: { decision: "REPLAN", reason: "UNKNOWN_ERROR_LLM_FAILED" }, status: "DONE" };
+    return { reflection: { decision: "ASK_USER", reason: "UNKNOWN_ERROR_LLM_FAILED" }, status: "DONE" };
   }
 
   return { reflection: { decision: "CONTINUE", reason: "Execution successful (fallback)" }, status: "DONE" };

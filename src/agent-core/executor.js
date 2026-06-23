@@ -228,7 +228,8 @@ async function runExecutor(step, context, args) {
       const originalCode = fs.readFileSync(fullPath, "utf-8");
       const lines = originalCode.split('\n');
       const start = Math.max(0, step.input.startLine - 1);
-      const end = Math.min(lines.length, step.input.endLine);
+      const explicitEndLine = step.input.endLine !== undefined ? step.input.endLine : lines.length;
+      const end = Math.min(lines.length, explicitEndLine === 0 ? lines.length : explicitEndLine);
       const replacementLines = step.input.newCode.split('\n');
       lines.splice(start, end - start, ...replacementLines);
       const content = lines.join('\n');

@@ -27,7 +27,8 @@ function buildMinimalContext(state) {
     goal: state.goal,
     currentIntent: state.currentIntent,
     lastActions: lastActions,
-    availableTools: availableTools
+    availableTools: availableTools,
+    relevantMemory: state.relevantMemory || null
   };
 }
 

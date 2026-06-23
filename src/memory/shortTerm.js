@@ -92,47 +92,134 @@ function readSessionFromDisk(sessionId) {
   }
 }
 
-// ─── Write a single session to disk ──────────────────────────────────────────
+// ─── Debounce registry: prevents write storms under rapid saves ──────────────
+const _writeTimers = new Map();
+
+// ─── Write a single session to disk (async, debounced per sessionId) ─────────
 function writeSessionToDisk(sessionId, data) {
   ensureDir();
   const filePath = sessionFilePath(sessionId);
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
-  } catch (e) {
-    console.error(
-      `[SessionStore] Failed to save session ${sessionId}:`,
-      e.message,
-    );
+
+  // Snapshot the data now so late mutations don't affect what we write
+  const snapshot = JSON.stringify(data, null, 2);
+
+  // Clear any pending write for this session and schedule a new one
+  if (_writeTimers.has(sessionId)) {
+    clearTimeout(_writeTimers.get(sessionId));
   }
+
+  _writeTimers.set(
+    sessionId,
+    setTimeout(() => {
+      _writeTimers.delete(sessionId);
+      fs.promises
+        .writeFile(filePath, snapshot, "utf8")
+        .catch((e) =>
+          console.error(
+            `[SessionStore] Failed to save session ${sessionId}:`,
+            e.message,
+          ),
+        );
+    }, 150), // 150 ms debounce window
+  );
 }
 
-// ─── Long Term Memory ────────────────────────────────────────────────────────
+// ─── Long Term Memory ────────────────────────────────────────────────
 const PROFILE_FILE = path.join(SESSIONS_DIR, "user_profile.json");
 let userProfileCache = null;
+let _ltmWriteTimer   = null;
+
+/**
+ * V3 schema:
+ * permanent.user        → rich object  { name, role, skills[], goals[] }
+ * permanent.projects    → array        [{ name, description, stack[] }]
+ * permanent.preferences → object       { codeStyle, verbosity, architectureBias }
+ * permanent.relationships → array      [{ entity, type }]
+ */
+function _v3Default() {
+  return {
+    _version: 3,
+    permanent: {
+      user:          {},
+      projects:      [],
+      preferences:   {},
+      relationships: [],
+    },
+    session: {
+      instructions:     [],
+      temporary_context: [],
+    },
+  };
+}
 
 function getLongTermMemory() {
   if (userProfileCache) return userProfileCache;
+
+  const defaultProfile = _v3Default();
+
   if (!fs.existsSync(PROFILE_FILE)) {
-    return { name: "", preferences: [], facts: [] };
+    userProfileCache = defaultProfile;
+    return userProfileCache;
   }
   try {
-    userProfileCache = JSON.parse(fs.readFileSync(PROFILE_FILE, "utf8"));
-    if (!userProfileCache.name) userProfileCache.name = "";
-    if (!userProfileCache.preferences) userProfileCache.preferences = [];
-    if (!userProfileCache.facts) userProfileCache.facts = [];
+    userProfileCache = JSON.parse(fs.readFileSync(PROFILE_FILE, 'utf8'));
+
+    // ─── Migration V1/V2 → V3 ───────────────────────────────────────────────
+    const v = userProfileCache._version || 0;
+    if (v < 3) {
+      const migrated = _v3Default();
+      const src = userProfileCache.permanent || {};
+
+      // Carry over user and preferences as-is
+      migrated.permanent.user        = src.user        || {};
+      migrated.permanent.preferences = src.preferences || {};
+
+      // V1: flat name field
+      if (v <= 1 && userProfileCache.name) {
+        migrated.permanent.user.name = userProfileCache.name;
+      }
+
+      // V2: projects/relationships were objects → convert to arrays
+      if (src.projects && !Array.isArray(src.projects)) {
+        migrated.permanent.projects = Object.values(src.projects);
+      } else {
+        migrated.permanent.projects = Array.isArray(src.projects) ? src.projects : [];
+      }
+      if (src.relationships && !Array.isArray(src.relationships)) {
+        migrated.permanent.relationships = Object.values(src.relationships);
+      } else {
+        migrated.permanent.relationships = Array.isArray(src.relationships) ? src.relationships : [];
+      }
+
+      migrated.session  = userProfileCache.session || migrated.session;
+      userProfileCache  = migrated;
+      console.log(`[LTM] Migrated user profile V${v} → V3`);
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     return userProfileCache;
   } catch {
-    return { name: "", preferences: [], facts: [] };
+    userProfileCache = defaultProfile;
+    return userProfileCache;
   }
 }
 
+/**
+ * Persist the user profile. Async + debounced to avoid blocking the event loop.
+ */
 function updateLongTermMemory(newProfile) {
   userProfileCache = newProfile;
   ensureDir();
-  try {
-    fs.writeFileSync(PROFILE_FILE, JSON.stringify(newProfile, null, 2), "utf8");
-  } catch {}
+  const snapshot = JSON.stringify(newProfile, null, 2);
+  if (_ltmWriteTimer) clearTimeout(_ltmWriteTimer);
+  _ltmWriteTimer = setTimeout(() => {
+    _ltmWriteTimer = null;
+    fs.promises
+      .writeFile(PROFILE_FILE, snapshot, 'utf8')
+      .catch((e) => console.error('[LTM] Failed to save user profile:', e.message));
+  }, 200);
 }
+
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -719,28 +806,40 @@ function extractFilePathsFromText(text) {
 }
 
 /**
- * Validate compression quality
+ * Validate compression quality.
+ * For pure chat/reasoning sessions (no file paths), only check compression ratio.
+ * For code sessions, also check that file paths are retained in the summary.
  */
 function validateCompressionQuality(originalMessages, compressionResults) {
   const { consolidatedSummary, chunks } = compressionResults;
 
-  // Check if critical information is preserved
   const originalText = originalMessages.map(m => m.content || '').join(' ');
   const filePaths = extractFilePathsFromText(originalText);
   const summaryFilePaths = extractFilePathsFromText(consolidatedSummary);
 
-  const pathRetention = summaryFilePaths.length / (filePaths.length || 1);
+  const hasFilePaths = filePaths.length > 0;
+  const pathRetention = hasFilePaths
+    ? summaryFilePaths.length / filePaths.length
+    : 1.0; // Pure chat: no file paths to lose, so retention is perfect by definition
 
-  // Check length ratio
   const originalLength = originalText.length;
   const summaryLength = consolidatedSummary.length;
-  const compressionRatio = 1 - (summaryLength / originalLength);
+  const compressionRatio = originalLength > 0
+    ? 1 - (summaryLength / originalLength)
+    : 0;
 
-  // Quality score
-  const score = (pathRetention * 0.6) + (compressionRatio * 0.4);
+  // Weight path retention lower if there are no code paths
+  const pathWeight = hasFilePaths ? 0.6 : 0.0;
+  const ratioWeight = hasFilePaths ? 0.4 : 1.0;
+  const score = (pathRetention * pathWeight) + (compressionRatio * ratioWeight);
+
+  // For code sessions require path retention ≥ 70%; for chat just need ratio > 0.3
+  const acceptable = hasFilePaths
+    ? score > 0.4 && pathRetention > 0.7
+    : compressionRatio > 0.3;
 
   return {
-    acceptable: score > 0.4 && pathRetention > 0.7,
+    acceptable,
     score,
     pathRetention,
     compressionRatio,
@@ -749,6 +848,7 @@ function validateCompressionQuality(originalMessages, compressionResults) {
       chunks: chunks.length,
       pathsPreserved: summaryFilePaths.length,
       pathsOriginal: filePaths.length,
+      sessionType: hasFilePaths ? 'code' : 'chat',
     },
   };
 }
@@ -845,8 +945,6 @@ function mergeDuplicateFileChanges(changes) {
  * Group messages by semantic similarity (simplified)
  */
 function groupBySemanticSimilarity(messages) {
-  // For now, just return as-is
-  // In production, use embeddings to group related messages
   return messages;
 }
 
@@ -904,31 +1002,24 @@ function formatMessageContent(message) {
   return '[Action]';
 }
 
-module.exports = {
-  compressSession,
-  identifyMessageSegments,
-  extractKeyEvents,
-  extractFileChanges,
-  extractCodeSnippets,
-};
-
 /**
  * Get highly relevant episodic memories based on the attention system (importance, recency, relevance).
+ * Scores each episodic entry by importance × 1.5 + recency × 0.5 + keyword-relevance × 2.0
  */
 function getAttentiveMemory(sessionId, currentTaskContext, limit = 3) {
   const session = getSession(sessionId);
-  if (!session || !session.episodicMemory) return [];
+  if (!session || !session.episodicMemory || session.episodicMemory.length === 0) return [];
 
   const now = Date.now();
   const scoredMemories = session.episodicMemory.map(mem => {
-    // 1. Recency Score (decays over hours)
+    // 1. Recency Score (decays 1 point per hour, floor 0)
     const age = now - (mem.timestamp || now);
     const recencyScore = Math.max(0, 100 - (age / (1000 * 60 * 60)));
 
-    // 2. Importance Score (default 50 if not specified)
+    // 2. Importance Score (failures = 80, successes = 30, explicit override if set)
     const importanceScore = mem.importance || 50;
 
-    // 3. Relevance Score (keyword overlap heuristic)
+    // 3. Relevance Score (keyword overlap between task and stored summary)
     let relevanceScore = 0;
     if (currentTaskContext && mem.summary) {
       const keywords = currentTaskContext.toLowerCase().split(/\s+/);
@@ -940,7 +1031,6 @@ function getAttentiveMemory(sessionId, currentTaskContext, limit = 3) {
     relevanceScore = Math.min(100, relevanceScore);
 
     const totalScore = (importanceScore * 1.5) + (recencyScore * 0.5) + (relevanceScore * 2.0);
-
     return { ...mem, scores: { importanceScore, recencyScore, relevanceScore, totalScore } };
   });
 
@@ -948,14 +1038,24 @@ function getAttentiveMemory(sessionId, currentTaskContext, limit = 3) {
   return scoredMemories.slice(0, limit);
 }
 
+// ─── Single authoritative export ──────────────────────────────────────────────
 module.exports = {
+  // Session CRUD
   getSession,
   saveSession,
   deleteSession,
   getAllSessions,
   clearAllSessions,
+  // Long-Term Memory
   getLongTermMemory,
   updateLongTermMemory,
+  // Episodic compression & retrieval
   compressSession,
-  getAttentiveMemory
+  getAttentiveMemory,
+  // Utilities (used by tests and other modules)
+  identifyMessageSegments,
+  extractKeyEvents,
+  extractFileChanges,
+  extractCodeSnippets,
 };
+

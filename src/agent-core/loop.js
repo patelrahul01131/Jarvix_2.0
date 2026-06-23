@@ -151,25 +151,37 @@ async function classifyIntent(goal, args, session) {
   );
 
   try {
-    let rawOutput = "";
-    await callLLM({
+    const { reply } = await callLLM({
       messages,
       system,
       model: args.model,
       provider: args.provider,
-      onChunk: (chunk) => {
-        rawOutput += chunk;
-      },
     });
 
-    let cleanJson = rawOutput
-      .replace(/```json/g, "")
+    let cleanJson = reply
+      .replace(/```json/gi, "")
       .replace(/```/g, "")
       .trim();
-    const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      cleanJson = jsonMatch[0];
+
+    // Robustly extract the first balanced JSON object
+    let startIndex = cleanJson.indexOf("{");
+    if (startIndex !== -1) {
+      let braceCount = 0;
+      let endIndex = -1;
+      for (let i = startIndex; i < cleanJson.length; i++) {
+        if (cleanJson[i] === "{") braceCount++;
+        else if (cleanJson[i] === "}") braceCount--;
+
+        if (braceCount === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+      if (endIndex !== -1) {
+        cleanJson = cleanJson.substring(startIndex, endIndex + 1);
+      }
     }
+
     const result = JSON.parse(cleanJson);
     return {
       intent: result.intent || "CODE_MODIFICATION",
@@ -215,36 +227,86 @@ async function classifyIntent(goal, args, session) {
       intent: isCode ? "CODE_MODIFICATION" : "CHAT",
       execution_mode: isCode ? "agent" : "chat",
       complexity: isCode ? 60 : 10,
-  requires_planning: isCode,
+      requires_planning: isCode,
     };
   }
 }
 
-async function normalizeGoal(question, intent, previousGoal, args, currentProfile) {
+async function normalizeGoal(
+  question,
+  intent,
+  previousGoal,
+  args,
+  currentProfile,
+  recentMessages,
+) {
+  const now = new Date().toISOString();
+  const recentCtx = (recentMessages || [])
+    .slice(-6)
+    .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
+    .join("\n");
+
   const system = `You are the Goal and Fact Extractor.
-Extract the user's implicit or explicit goal into a concise, actionable statement (e.g., "Continue JavaScript MCQ session", "Fix bug in auth route").
+Extract the user's implicit or explicit goal into a concise, actionable statement.
 Compare this to the previous goal: "${previousGoal || "None"}".
-If the topic has shifted drastically (e.g. from Coding to Learning, or to a completely unrelated feature), set resetMemory to true. Otherwise, false.
+If the topic has shifted drastically, set resetMemory to true.
 
 CRITICAL FACT EXTRACTION:
-If the user mentions any personal facts (e.g., their name, preferences, skill level, or absolute rules), extract them into the "extractedFacts" object.
-DO NOT extract conversational history, temporary context, or specific data values (like "secret codes", passwords, or one-off questions) as facts. Only extract permanent user profile preferences.
+Extract facts EXPLICITLY STATED by the user. DO NOT infer facts from workspace or filesystem operations.
+Categorize permanent facts into:
+- user: (e.g., {"laptop_ram": {"value": "32GB", "source": "user_statement", "updated_at": "${now}"}})
+- projects: (Use stable IDs. e.g. {"project_1": {"name": "IntelliPilot", "language": "TypeScript", "source": "user_statement", "updated_at": "${now}"}})
+- preferences: (e.g., {"answer_style": {"value": "short", "source": "user_statement", "updated_at": "${now}"}})
+- relationships: (e.g., {"friend": {"name": "Amit", "source": "user_statement", "updated_at": "${now}"}})
+
+RENAME LOGIC:
+If the user asks to rename an entity (project, preference, etc.), check the Current User Profile to find the entity by its CURRENT name (resolving pronouns like "it" from recent conversation context).
+Then output a rename operation in the "renames" array:
+{
+  "category": "projects",
+  "entity_id": "project_1",
+  "field": "name",
+  "old_value": "IntelliPilot",
+  "new_value": "IntelliCore",
+  "updated_at": "${now}"
+}
+Do NOT add the renamed entity to the permanent.projects block — use the renames array only.
+
+TEMPORARY INSTRUCTIONS:
+If the user gives a temporary instruction (e.g. "for this response only"), add it to session_instructions array. NEVER store it in permanent.
+
+FORGET LOGIC:
+If the user asks to forget something, add its exact dot-notation key (e.g. "permanent.projects.project_1") to remove_keys array.
+
+Recent Conversation (for resolving pronouns like "it", "that project"):
+${recentCtx || "None"}
 
 Current User Profile:
 ${JSON.stringify(currentProfile, null, 2)}
-
-If the user explicitly asks to forget or remove a rule/preference, place the EXACT string from the current profile into the "remove_preferences" or "remove_facts" arrays.
 
 Output strictly as JSON:
 {
   "goal": "string",
   "resetMemory": boolean,
   "extractedFacts": {
-    "name": "string (optional)",
-    "preferences": ["string (optional)"],
-    "facts": ["string (optional)"],
-    "remove_preferences": ["string (optional)"],
-    "remove_facts": ["string (optional)"]
+    "permanent": {
+      "user": {},
+      "projects": {},
+      "preferences": {},
+      "relationships": {}
+    },
+    "renames": [
+      {
+        "category": "string",
+        "entity_id": "string",
+        "field": "string",
+        "old_value": "string",
+        "new_value": "string",
+        "updated_at": "string"
+      }
+    ],
+    "session_instructions": ["string"],
+    "remove_keys": ["string"]
   }
 }`;
   try {
@@ -253,7 +315,7 @@ Output strictly as JSON:
       messages: [
         {
           role: "user",
-          content: `Analyze the following user input and extract the goal and facts as instructed.\n\n<user_input>\n${question}\n</user_input>\n\nRemember: You must output ONLY valid JSON, do not reply conversationally.`,
+          content: `Analyze the following user input and extract the goal and facts as instructed.\n\n<user_input>\n${question}\n</user_input>\n\nRemember: You must output ONLY valid JSON, do not reply conversationally. Escape all newlines in strings as \\n.`,
         },
       ],
       system,
@@ -309,10 +371,10 @@ async function runAgentLoop(goal, args) {
       goal || session?.messages.find((m) => m.role === "user")?.content || "",
     args: args,
     errors: [],
-    goalId: session?.goalId || null, // Phase 1: tracked goal
+    goalId: session?.goalId || null,
     truthState: session?.truthState || {},
     beliefState: session?.beliefState || {},
-    worldModel: worldModelInstance, // Phase 5: real causal model
+    worldModel: worldModelInstance,
     taskGraph: session?.taskGraph || { nodes: [], edges: [] },
     memory: session?.memory || { semantic: [], episodic: [] },
     currentIntent: session?.currentIntent || {},
@@ -329,12 +391,25 @@ async function runAgentLoop(goal, args) {
       toolCalls: 0,
       maxToolCalls: 20,
     },
-    workingMemory: session?.workingMemory || { activeFiles: [] },
-    taskMemory: session?.taskMemory || {
-      completed: [],
-      active: [],
-      pending: [],
+    // ─ Spec V3 schemas ───────────────────────────────────────────────────────
+    workingMemory: session?.workingMemory || {
+      currentFile:   null,
+      activeFunction: null,
+      lastToolUsed:  null,
+      temporaryNotes: null,
     },
+    taskMemory: session?.taskMemory || {
+      objective:          '',
+      constraints:        [],
+      currentHypothesis:  null,
+      nextPlannedStep:    null,
+      blockers:           [],
+      // Legacy compat fields
+      completed: [],
+      active:    [],
+      pending:   [],
+    },
+    // ────────────────────────────────────────────────────────────────────────
     userProfile: require("../memory/shortTerm").getLongTermMemory(),
     failureMemory: session?.failureMemory || [],
     episodicMemory: session?.episodicMemory || [],
@@ -349,6 +424,20 @@ async function runAgentLoop(goal, args) {
     executionLogs:
       session && session.executionLogs ? session.executionLogs : [],
   };
+
+  // ─── Restore persisted beliefs into MemoryManager ────────────────────────────
+  // beliefData is stored as an array of [key, {value, confidence, lastUpdated, superseded}]
+  if (Array.isArray(session?.beliefData)) {
+    for (const [key, b] of session.beliefData) {
+      memoryManager.updateBelief(key, b.value ?? b.currentValue, b.confidence || 0.8, 'session_restore');
+    }
+  } else if (session?.beliefData && typeof session.beliefData === 'object') {
+    // Backward compat: old format was a plain object { key: { currentValue, confidence } }
+    for (const [key, b] of Object.entries(session.beliefData)) {
+      memoryManager.updateBelief(key, b.value ?? b.currentValue, b.confidence || 0.8, 'session_restore');
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
 
   // ─── Task Execution Runtime: replaces the naive for-loop ──────────────────
   // If we are resuming from an approved plan, run it through the full runtime:
@@ -428,14 +517,48 @@ async function runAgentLoop(goal, args) {
     try {
       // Refresh workspace files
       if (state.args.workspaceRoot) {
-        state.args.workspaceFiles = require("../tools/fileSystem").listWorkspaceFiles();
+        state.args.workspaceFiles =
+          require("../tools/fileSystem").listWorkspaceFiles();
       }
+
+      // Semantic Memory Retrieval Layer (Long-Term Memory)
+      if (state.userProfile) {
+        state.relevantMemory =
+          await require("../memory/memoryRetriever").retrieveContext(
+            state.goal,
+            state.userProfile,
+            state.args,
+          );
+      }
+
+      // ─── Episodic Memory Retrieval (Attentive Memory) ────────────────────────
+      // Retrieve the most relevant past episodes and inject into Thinker context.
+      const { getAttentiveMemory } = require("../memory/shortTerm");
+      const attentiveEpisodes = getAttentiveMemory(
+        state.args.sessionId,
+        state.goal,
+        3,
+      );
+      if (attentiveEpisodes.length > 0) {
+        state.episodicContext = attentiveEpisodes
+          .map(
+            (ep, i) =>
+              `[Episode ${i + 1}] ${ep.summary || ep.tool || 'past action'}`+
+              (ep.fileChanges?.length ? ` | Files: ${ep.fileChanges.map(f=>f.path).join(', ')}` : ''),
+          )
+          .join('\n');
+        console.log(`[AttentiveMemory] Injecting ${attentiveEpisodes.length} relevant episodes into Thinker.`);
+      } else {
+        state.episodicContext = null;
+      }
+      // ─────────────────────────────────────────────────────────────────────────
 
       const res = await runThinker(state, state.args);
       return { thought: res.thought, attempts };
     } catch (err) {
       console.error("[Agent OS] Thinker error:", err);
-      if (state.args.onChunk) state.args.onChunk(`\n⚠️ **Error:** ${err.message}\n`);
+      if (state.args.onChunk)
+        state.args.onChunk(`\n⚠️ **Error:** ${err.message}\n`);
       return { status: "FAILED", attempts };
     }
   }
@@ -450,7 +573,7 @@ async function runAgentLoop(goal, args) {
     try {
       const res = await runActor(state, state.args, state.thought);
       action = res.action;
-      
+
       console.log("\n=========================");
       console.log("[DEBUG] ACTOR PLAN:", JSON.stringify(action, null, 2));
       console.log("=========================\n");
@@ -467,11 +590,14 @@ async function runAgentLoop(goal, args) {
 
     const steps = action;
     let attempts = state.attempts || 1;
-    
+
     // If the only step is a response, we're done
     if (steps.length === 1 && steps[0].tool === "response") {
-      if (state.args.onChunk)
-        state.args.onChunk(`\n${steps[0].input.message}\n`);
+      const responseText =
+        steps[0].input.content !== undefined
+          ? steps[0].input.content
+          : steps[0].input.message;
+      if (state.args.onChunk) state.args.onChunk(`\n${responseText}\n`);
       return { action: steps[0], attempts, status: "DONE" };
     }
 
@@ -480,10 +606,12 @@ async function runAgentLoop(goal, args) {
       const pt = action._tokenUsage.prompt_tokens || 0;
       const ct = action._tokenUsage.completion_tokens || 0;
       tokenMsg = `\n\n---\n⚡ **Tokens:** \`${pt}\` In | \`${ct}\` Out\n`;
-      let sess = require("../memory/shortTerm").getSession(state.args.sessionId);
+      let sess = require("../memory/shortTerm").getSession(
+        state.args.sessionId,
+      );
       if (sess) {
-        if (!sess.developerTools) sess.developerTools = [];
-        sess.developerTools.push({
+        if (!sess.executionLogs) sess.executionLogs = [];
+        sess.executionLogs.push({
           type: "tokenUsage",
           data: { prompt_tokens: pt, completion_tokens: ct },
           timestamp: new Date().toLocaleTimeString(),
@@ -506,22 +634,32 @@ async function runAgentLoop(goal, args) {
           state.args.onStatus(
             `[${new Date().toLocaleTimeString()}] ❌ Loop Detected: Agent repeated action 3 times`,
           );
-        let sess = require("../memory/shortTerm").getSession(state.args.sessionId);
+        let sess = require("../memory/shortTerm").getSession(
+          state.args.sessionId,
+        );
         if (sess) {
-          if (!sess.developerTools) sess.developerTools = [];
-          sess.developerTools.push({
+          if (!sess.executionLogs) sess.executionLogs = [];
+          sess.executionLogs.push({
             type: "error",
             data: { message: "Loop Detected: Agent repeated action 3 times" },
             timestamp: new Date().toLocaleTimeString(),
           });
-          require("../memory/shortTerm").saveSession(state.args.sessionId, sess);
+          require("../memory/shortTerm").saveSession(
+            state.args.sessionId,
+            sess,
+          );
         }
         return { status: "FAILED", attempts };
       }
     }
 
     // High-risk tools require user approval
-    const highRisk = ["fs.writeFile", "fs.editFile", "fs.editFileLines", "terminal.exec"];
+    const highRisk = [
+      "fs.writeFile",
+      "fs.editFile",
+      "fs.editFileLines",
+      "terminal.exec",
+    ];
     const hasHighRisk = steps.some((s) => highRisk.includes(s.tool));
 
     if (hasHighRisk) {
@@ -532,10 +670,12 @@ async function runAgentLoop(goal, args) {
         state.autoExecute = true;
       }
 
-      let sess = require("../memory/shortTerm").getSession(state.args.sessionId);
+      let sess = require("../memory/shortTerm").getSession(
+        state.args.sessionId,
+      );
       if (sess) {
-        if (!sess.developerTools) sess.developerTools = [];
-        sess.developerTools.push({
+        if (!sess.executionLogs) sess.executionLogs = [];
+        sess.executionLogs.push({
           type: "plan",
           data: action,
           timestamp: new Date().toLocaleTimeString(),
@@ -546,12 +686,20 @@ async function runAgentLoop(goal, args) {
           mdContent += `#### Execution Steps:\n`;
           steps.forEach((s, i) => {
             let stepDesc = `Run \`${s.tool}\``;
-            if (s.tool === "fs.writeFile" || s.tool === "fs.editFile" || s.tool === "fs.editFileLines" || s.tool === "fs.deleteFile") {
+            if (
+              s.tool === "fs.writeFile" ||
+              s.tool === "fs.editFile" ||
+              s.tool === "fs.editFileLines" ||
+              s.tool === "fs.deleteFile"
+            ) {
               const pathParts = (s.input?.path || "").split(/[\/\\]/);
               const filename = pathParts.pop();
-              stepDesc = s.tool === "fs.writeFile" ? `Create file \`${filename}\`` 
-                : (s.tool === "fs.editFile" || s.tool === "fs.editFileLines") ? `Modify file \`${filename}\`` 
-                : `Delete file \`${filename}\``;
+              stepDesc =
+                s.tool === "fs.writeFile"
+                  ? `Create file \`${filename}\``
+                  : s.tool === "fs.editFile" || s.tool === "fs.editFileLines"
+                    ? `Modify file \`${filename}\``
+                    : `Delete file \`${filename}\``;
             } else if (s.tool === "terminal.exec") {
               stepDesc = `Run command \`${s.input?.cmd || "unknown"}\``;
             } else if (s.tool === "response") {
@@ -560,7 +708,9 @@ async function runAgentLoop(goal, args) {
             mdContent += `${i + 1}. **Step**: ${stepDesc}\n`;
           });
 
-          sess.messages.forEach((m) => { if (m.isPlan) m.isPlan = false; });
+          sess.messages.forEach((m) => {
+            if (m.isPlan) m.isPlan = false;
+          });
           sess.messages.push({
             role: "assistant",
             content: mdContent,
@@ -571,12 +721,21 @@ async function runAgentLoop(goal, args) {
         } else {
           const s = steps[0];
           if (s.tool === "terminal.exec") {
-            const cmdString = s.input.cmd + (s.input.args && s.input.args.length > 0 ? " " + s.input.args.join(" ") : "");
+            const cmdString =
+              s.input.cmd +
+              (s.input.args && s.input.args.length > 0
+                ? " " + s.input.args.join(" ")
+                : "");
             sess.messages.push({
               role: "assistant",
               content: `Proposed command: ${cmdString}`,
               isPlan: false,
-              suggestedCommands: [{ command: cmdString, status: state.autoExecute ? "approved" : "pending" }],
+              suggestedCommands: [
+                {
+                  command: cmdString,
+                  status: state.autoExecute ? "approved" : "pending",
+                },
+              ],
             });
           } else {
             const targetPath = s.input.path || s.input.file || "unknown_file";
@@ -586,26 +745,42 @@ async function runAgentLoop(goal, args) {
             } else if (s.tool === "fs.editFileLines") {
               const fs = require("fs");
               const path = require("path");
-              const fullPath = path.resolve(state.args.workspaceRoot, targetPath);
+              const fullPath = path.resolve(
+                state.args.workspaceRoot,
+                targetPath,
+              );
               if (fs.existsSync(fullPath)) {
                 const originalCode = fs.readFileSync(fullPath, "utf-8");
-                const lines = originalCode.split('\n');
+                const lines = originalCode.split("\n");
                 const start = Math.max(0, (s.input.startLine || 1) - 1);
-                const end = Math.min(lines.length, s.input.endLine || lines.length);
-                const replacementLines = (s.input.newCode || "").split('\n');
+                const explicitEndLine =
+                  s.input.endLine !== undefined
+                    ? s.input.endLine
+                    : lines.length;
+                const end = Math.min(
+                  lines.length,
+                  explicitEndLine === 0 ? lines.length : explicitEndLine,
+                );
+                const replacementLines = (s.input.newCode || "").split("\n");
                 lines.splice(start, end - start, ...replacementLines);
-                newCode = lines.join('\n');
+                newCode = lines.join("\n");
               } else {
                 newCode = s.input.newCode || "";
               }
             } else if (s.tool === "fs.editFile") {
               const fs = require("fs");
               const path = require("path");
-              const fullPath = path.resolve(state.args.workspaceRoot, targetPath);
+              const fullPath = path.resolve(
+                state.args.workspaceRoot,
+                targetPath,
+              );
               if (fs.existsSync(fullPath)) {
                 const originalCode = fs.readFileSync(fullPath, "utf-8");
                 if (originalCode.includes(s.input.target)) {
-                  newCode = originalCode.replace(s.input.target, s.input.replacement);
+                  newCode = originalCode.replace(
+                    s.input.target,
+                    s.input.replacement,
+                  );
                 } else {
                   newCode = originalCode;
                 }
@@ -624,9 +799,16 @@ async function runAgentLoop(goal, args) {
                     try {
                       const _fs = require("fs");
                       const _path = require("path");
-                      const _fp = _path.resolve(state.args.workspaceRoot, targetPath);
-                      return _fs.existsSync(_fp) ? _fs.readFileSync(_fp, "utf-8") : "";
-                    } catch { return ""; }
+                      const _fp = _path.resolve(
+                        state.args.workspaceRoot,
+                        targetPath,
+                      );
+                      return _fs.existsSync(_fp)
+                        ? _fs.readFileSync(_fp, "utf-8")
+                        : "";
+                    } catch {
+                      return "";
+                    }
                   })(),
                   isNew: s.tool === "fs.writeFile",
                   status: state.autoExecute ? "approved" : "pending",
@@ -649,8 +831,8 @@ async function runAgentLoop(goal, args) {
     // Save non-high-risk plan to dev tools as well
     let sess2 = require("../memory/shortTerm").getSession(state.args.sessionId);
     if (sess2) {
-      if (!sess2.developerTools) sess2.developerTools = [];
-      sess2.developerTools.push({
+      if (!sess2.executionLogs) sess2.executionLogs = [];
+      sess2.executionLogs.push({
         type: "plan",
         data: action,
         timestamp: new Date().toLocaleTimeString(),
@@ -845,17 +1027,20 @@ async function runAgentLoop(goal, args) {
         input: state.action.input,
         success: execRes.success !== false,
         summary: `Action: ${state.action.tool}. Result: ${execRes.success !== false ? "SUCCESS" : "FAILED - " + (execRes.stderr || "Unknown error")}`,
-        importance: execRes.success !== false ? 30 : 80, // Failures are more important to remember for repair
+        importance: execRes.success !== false ? 30 : 80,
       };
       sess.episodicMemory.push(traceEntry);
 
-      // Keep legacy failureMemory for fallback compatibility during transition
+      // Spec-format failureMemory entry
       if (execRes.success === false) {
-        state.failureMemory.push({
-          tool: state.action.tool,
-          input: state.action.input,
-          error: execRes.stderr || "Unknown execution error",
-        });
+        const failEntry = {
+          type:      'tool_error',
+          tool:      state.action.tool,
+          error:     execRes.stderr || 'Unknown execution error',
+          timestamp: Date.now(),
+          resolved:  false,
+        };
+        state.failureMemory.push(failEntry);
         sess.failureMemory = state.failureMemory;
       }
       // -------------------------------
@@ -961,15 +1146,21 @@ async function runAgentLoop(goal, args) {
   // ─── LangGraph Edges ────────────────────────────────────────────────────────
   function shouldContinue(state) {
     // Phase 5: Loop Detection
-    const lastAction = state.actionHistory && state.actionHistory.length > 0 
-      ? JSON.parse(state.actionHistory[state.actionHistory.length - 1]) 
-      : null;
-    
+    const lastAction =
+      state.actionHistory && state.actionHistory.length > 0
+        ? JSON.parse(state.actionHistory[state.actionHistory.length - 1])
+        : null;
+
     if (lastAction) {
-      const loopCheck = loopDetector.recordAction(lastAction[0], state.lastResult);
+      const loopCheck = loopDetector.recordAction(
+        lastAction[0],
+        state.lastResult,
+      );
       if (loopCheck.isLoop) {
         if (state.args.onChunk)
-          state.args.onChunk(`\n⚠️ **Jarvix Checkpoint: ${loopCheck.reason}**\n`);
+          state.args.onChunk(
+            `\n⚠️ **Jarvix Checkpoint: ${loopCheck.reason}**\n`,
+          );
         state.status = "HARD_STOP";
       }
     }
@@ -1079,7 +1270,7 @@ async function runAgentLoop(goal, args) {
 
   async function observationNode(state) {
     const res = await runObservation(state, initialContext.args);
-    return { structuredObservation: res.observation };
+    return { structuredObservation: res.structuredObservation };
   }
 
   async function reflectionNode(state) {
@@ -1194,56 +1385,74 @@ async function runAgentLoop(goal, args) {
   const app = workflow.compile();
 
   let finalState;
-  
+
   // -- Safety Manager: Allocate limits --
   const preFlightProfile = analyzeIntent(initialContext.goal);
-  const limits = SafetyManager.allocateLimits(initialContext.args.sessionId, preFlightProfile);
-  
-  console.log(`[Agent OS] Safety Profile: ${limits.reason} | Timeout: ${limits.timeoutMs}ms`);
+  const limits = SafetyManager.allocateLimits(
+    initialContext.args.sessionId,
+    preFlightProfile,
+  );
+
+  console.log(
+    `[Agent OS] Safety Profile: ${limits.reason} | Timeout: ${limits.timeoutMs}ms`,
+  );
 
   const abortController = new AbortController();
-  
+
   // Attach abortController to args so llmClient and planner can listen to it
   if (!initialContext.args) initialContext.args = {};
   initialContext.args.signal = abortController.signal;
 
   const timeoutPromise = new Promise((_, reject) => {
     setTimeout(() => {
-        abortController.abort();
-        const err = new Error(`Timeout: Task execution exceeded safety limit of ${limits.timeoutMs}ms.`);
-        err.name = "TimeoutError";
-        reject(err);
+      abortController.abort();
+      const err = new Error(
+        `Timeout: Task execution exceeded safety limit of ${limits.timeoutMs}ms.`,
+      );
+      err.name = "TimeoutError";
+      reject(err);
     }, limits.timeoutMs);
   });
 
   try {
-    const invokePromise = app.invoke(initialContext, { recursionLimit: limits.recursionLimit });
+    const invokePromise = app.invoke(initialContext, {
+      recursionLimit: limits.recursionLimit,
+    });
     finalState = await Promise.race([invokePromise, timeoutPromise]);
-    
+
     // Record success metrics
-    SafetyManager.recordExecutionMetrics(preFlightProfile.intent, finalState.attempts || 1, false, false);
-    
+    SafetyManager.recordExecutionMetrics(
+      preFlightProfile.intent,
+      finalState.attempts || 1,
+      false,
+      false,
+    );
   } catch (err) {
     console.error("[Agent OS] LangGraph execution error:", err);
-    
+
     const isRecursionLimit = err.name === "GraphRecursionError";
     const isTimeout = err.name === "TimeoutError";
-    
+
     // Record failure metrics
     SafetyManager.recordExecutionMetrics(
-      preFlightProfile.intent, 
-      limits.recursionLimit, 
-      isTimeout, 
-      isRecursionLimit
+      preFlightProfile.intent,
+      limits.recursionLimit,
+      isTimeout,
+      isRecursionLimit,
     );
 
     if (initialContext.args && initialContext.args.onChunk) {
-      const partialTasks = initialContext.taskMemory?.completed?.map(t => t.title) || [];
+      const partialTasks =
+        initialContext.taskMemory?.completed?.map((t) => t.title) || [];
       const degradationMsg = SafetyManager.generateDegradationMessage(
-          isTimeout ? "TIMEOUT" : (isRecursionLimit ? "RECURSION_LIMIT" : "UNKNOWN"),
-          limits.recursionLimit,
-          limits.recursionLimit,
-          partialTasks
+        isTimeout
+          ? "TIMEOUT"
+          : isRecursionLimit
+            ? "RECURSION_LIMIT"
+            : "UNKNOWN",
+        limits.recursionLimit,
+        limits.recursionLimit,
+        partialTasks,
       );
       initialContext.args.onChunk(`\n${degradationMsg}\n`);
     }
@@ -1259,7 +1468,7 @@ async function runAgentLoop(goal, args) {
     finalStatus = "FAILED";
   }
 
-  // ─── Fix 1: Persist WorldModel causal graph back to session ─────────────────
+  // ─── Persist WorldModel causal graph back to session ─────────────────────────
   // The DeepWorldModel instance lives inside finalState.worldModel.
   // We serialize it and store it on the session so it survives across loop calls.
   if (
@@ -1270,6 +1479,23 @@ async function runAgentLoop(goal, args) {
     const sess = shortTerm.getSession(args.sessionId);
     if (sess) {
       sess.worldModelData = finalState.worldModel.serialize();
+
+      // ─── Persist MemoryManager beliefs alongside WorldModel ─────────────────
+      // Spec format: array of [key, { value, confidence, lastUpdated, superseded }]
+      const beliefSnapshot = Array.from(memoryManager.beliefs.entries()).map(
+        ([key, belief]) => [
+          key,
+          {
+            value:       belief.value ?? belief.currentValue,
+            confidence:  belief.confidence,
+            lastUpdated: belief.lastUpdated || Date.now(),
+            superseded:  belief.superseded  || false,
+          },
+        ],
+      );
+      sess.beliefData = beliefSnapshot;
+      // ───────────────────────────────────────────────────────────────────────
+
       shortTerm.saveSession(args.sessionId, sess);
     }
   }
@@ -1304,34 +1530,74 @@ async function askAgent(args) {
 
     if (!session) {
       session = {
-        id: sessionId,
-        messages: [],
-        state: "idle",
-        agentStatus: "🟢 Idle",
-        taskMemory: { completed: [], active: [], pending: [], goal: "" },
-        workingMemory: { activeFiles: [] },
-        failureMemory: [],
+        id:          sessionId,
+        createdAt:   Date.now(),
+        updatedAt:   Date.now(),
+        messages:    [],
+        state:       'idle',
+        agentStatus: '🟢 Idle',
+        // Spec V3 schemas
+        taskMemory: {
+          objective:         '',
+          constraints:       [],
+          currentHypothesis: null,
+          nextPlannedStep:   null,
+          blockers:          [],
+          completed: [], active: [], pending: [],
+        },
+        workingMemory: {
+          currentFile:    null,
+          activeFunction: null,
+          lastToolUsed:   null,
+          temporaryNotes: null,
+        },
+        failureMemory:  [],
+        episodicMemory: [],
+        beliefData:     [],
+        executionLogs:  [],
+        worldModelData: {},
+        developerTools: { fs: true, exec: false, http: false },
         projectKnowledge: getProjectKnowledge(args.workspaceRoot),
       };
     } else {
-      if (!session.taskMemory)
+      session.updatedAt = Date.now();
+      // Ensure all V3 fields exist on older sessions
+      if (!session.taskMemory) {
         session.taskMemory = {
-          completed: [],
-          active: [],
-          pending: [],
-          goal: "",
+          objective: '', constraints: [], currentHypothesis: null,
+          nextPlannedStep: null, blockers: [],
+          completed: [], active: [], pending: [],
         };
-      if (!session.workingMemory) session.workingMemory = { activeFiles: [] };
-      if (!session.failureMemory) session.failureMemory = [];
+      } else {
+        // Upgrade old taskMemory that only had completed/active/pending
+        if (!('objective' in session.taskMemory)) session.taskMemory.objective = session.taskMemory.goal || '';
+        if (!session.taskMemory.constraints)    session.taskMemory.constraints    = [];
+        if (!session.taskMemory.blockers)        session.taskMemory.blockers        = [];
+      }
+      if (!session.workingMemory || !('currentFile' in session.workingMemory)) {
+        session.workingMemory = { currentFile: null, activeFunction: null, lastToolUsed: null, temporaryNotes: null };
+      }
+      if (!session.failureMemory)  session.failureMemory  = [];
+      if (!session.episodicMemory) session.episodicMemory = [];
+      if (!session.beliefData)     session.beliefData     = [];
+      if (!session.executionLogs)  session.executionLogs  = [];
+      if (!session.worldModelData) session.worldModelData = {};
+      if (!session.developerTools || Array.isArray(session.developerTools)) {
+        if (Array.isArray(session.developerTools)) {
+          // Migrate old timeline logs to the new field
+          session.executionLogs = session.developerTools;
+        }
+        session.developerTools = { fs: true, exec: false, http: false };
+      }
       if (!session.projectKnowledge)
         session.projectKnowledge = getProjectKnowledge(args.workspaceRoot);
-      if (!session.agentStatus) session.agentStatus = "🟢 Idle";
+      if (!session.agentStatus) session.agentStatus = '🟢 Idle';
     }
 
     if (question && !args.executePlan) {
       session.messages.push({ role: "user", content: question });
-      if (!session.developerTools) session.developerTools = [];
-      session.developerTools.push({
+      if (!session.executionLogs) session.executionLogs = [];
+      session.executionLogs.push({
         type: "timeline",
         data: { message: `User Message: ${question.slice(0, 50)}...` },
         timestamp: new Date().toLocaleTimeString(),
@@ -1342,8 +1608,6 @@ async function askAgent(args) {
     // Actually the UI expects the streaming message to be the last one
     session.messages.push({ role: "assistant", content: "", streaming: true });
     shortTerm.saveSession(sessionId, session);
-
-
 
     let fullResponse = "";
     const patchedOnChunk = (text) => {
@@ -1413,7 +1677,8 @@ async function askAgent(args) {
             classification.intent,
             prevGoal,
             loopArgs,
-            shortTerm.getLongTermMemory()
+            shortTerm.getLongTermMemory(),
+            session.messages,
           );
 
           if (goalData.resetMemory) {
@@ -1435,45 +1700,100 @@ async function askAgent(args) {
 
           if (goalData.extractedFacts) {
             const longTerm = shortTerm.getLongTermMemory();
-            if (goalData.extractedFacts.name)
-              longTerm.name = goalData.extractedFacts.name;
-            
-            // Removals
-            if (Array.isArray(goalData.extractedFacts.remove_preferences)) {
-              longTerm.preferences = longTerm.preferences.filter(
-                (p) => !goalData.extractedFacts.remove_preferences.includes(p)
-              );
-            }
-            if (Array.isArray(goalData.extractedFacts.remove_facts)) {
-              longTerm.facts = longTerm.facts.filter(
-                (f) => !goalData.extractedFacts.remove_facts.includes(f)
-              );
+            const ext = goalData.extractedFacts;
+
+            // Merge permanent categories
+            if (ext.permanent) {
+              for (const category of [
+                "user",
+                "projects",
+                "preferences",
+                "relationships",
+              ]) {
+                if (ext.permanent[category]) {
+                  if (!longTerm.permanent[category])
+                    longTerm.permanent[category] = {};
+                  Object.assign(
+                    longTerm.permanent[category],
+                    ext.permanent[category],
+                  );
+                }
+              }
             }
 
-            // Additions
-            if (Array.isArray(goalData.extractedFacts.preferences)) {
-              longTerm.preferences = [
-                ...new Set([
-                  ...longTerm.preferences,
-                  ...goalData.extractedFacts.preferences,
-                ]),
-              ];
+            // Forget logic
+            if (Array.isArray(ext.remove_keys)) {
+              for (const key of ext.remove_keys) {
+                const parts = key.split(".");
+                if (parts.length === 3 && parts[0] === "permanent") {
+                  const cat = parts[1];
+                  const item = parts[2];
+                  if (
+                    longTerm.permanent[cat] &&
+                    longTerm.permanent[cat][item]
+                  ) {
+                    delete longTerm.permanent[cat][item];
+                  }
+                }
+              }
             }
-            if (Array.isArray(goalData.extractedFacts.facts)) {
-              longTerm.facts = [
-                ...new Set([
-                  ...longTerm.facts,
-                  ...goalData.extractedFacts.facts,
-                ]),
-              ];
+
+            // Session instructions
+            if (
+              Array.isArray(ext.session_instructions) &&
+              ext.session_instructions.length > 0
+            ) {
+              if (!longTerm.session.instructions)
+                longTerm.session.instructions = [];
+              longTerm.session.instructions.push(...ext.session_instructions);
             }
+
+            if (goalData.resetMemory) {
+              longTerm.session.instructions = [];
+              longTerm.session.temporary_context = [];
+            }
+
             shortTerm.updateLongTermMemory(longTerm);
+
+            // ── Rename logic: find entity by name and update in-place ──────────
+            if (Array.isArray(ext.renames) && ext.renames.length > 0) {
+              const refreshed = shortTerm.getLongTermMemory();
+              for (const rename of ext.renames) {
+                const { category, entity_id, field, new_value, updated_at } = rename;
+                if (
+                  category &&
+                  entity_id &&
+                  field &&
+                  new_value &&
+                  refreshed.permanent[category] &&
+                  refreshed.permanent[category][entity_id]
+                ) {
+                  refreshed.permanent[category][entity_id][field] = new_value;
+                  refreshed.permanent[category][entity_id].updated_at = updated_at || new Date().toISOString();
+                  console.log(`[Memory] Renamed ${category}.${entity_id}.${field} → "${new_value}"`);
+                } else {
+                  // Fallback: search by current value of the field
+                  const cat = refreshed.permanent[category];
+                  if (cat) {
+                    for (const [key, val] of Object.entries(cat)) {
+                      if (val && val[field] === rename.old_value) {
+                        cat[key][field] = new_value;
+                        cat[key].updated_at = updated_at || new Date().toISOString();
+                        console.log(`[Memory] Renamed (fallback) ${category}.${key}.${field} → "${new_value}"`);
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+              shortTerm.updateLongTermMemory(refreshed);
+            }
           }
 
           session.userProfile = shortTerm.getLongTermMemory();
 
-          if (!session.developerTools) session.developerTools = [];
-          session.developerTools.push({
+          if (!session.executionLogs) session.executionLogs = [];
+          session.executionLogs.push({
             type: "timeline",
             data: {
               message: `Intent: ${classification.intent} | Goal: ${goalData.goal}`,
@@ -1580,6 +1900,65 @@ async function askAgent(args) {
         session.agentStatus = "🟢 Idle";
       }
     } else if (
+      // ─── Memory Intent Gate ───────────────────────────────────────────────────
+      // Handles MEMORY_READ, MEMORY_WRITE, MEMORY_DELETE without entering the
+      // agent loop. Prevents the planner from running list_dir / fs.readFile
+      // for profile-only operations.
+      classification &&
+      ["MEMORY_READ", "MEMORY_WRITE", "MEMORY_DELETE"].includes(
+        classification.intent,
+      )
+    ) {
+      if (onStatus)
+        onStatus(
+          `[${new Date().toLocaleTimeString()}] 🧠 Memory operation: ${classification.intent}`,
+        );
+      try {
+        const longTerm = shortTerm.getLongTermMemory();
+
+        if (classification.intent === "MEMORY_READ") {
+          // Use the already-retrieved relevantMemory from state, or fall back to full profile
+          const memCtx = JSON.stringify(longTerm.permanent || {}, null, 2);
+          const { reply } = await callLLM({
+            messages: [
+              {
+                role: "user",
+                content: question,
+              },
+            ],
+            system: `You are Jarvix, a helpful AI assistant. Answer the user's question using ONLY the facts provided in the User Memory below. Do not invent or infer anything beyond what is explicitly stored.
+If the requested information is not present in memory, say "I don't have that information stored."
+
+User Memory:
+${memCtx}`,
+            model: loopArgs.model,
+            provider: loopArgs.provider,
+          });
+          patchedOnChunk(reply);
+          result = { status: "DONE" };
+        } else if (classification.intent === "MEMORY_WRITE") {
+          // Re-use the already-extracted goalData.extractedFacts which was set above
+          // and confirm to the user
+          const confirmMsg = goalData?.extractedFacts
+            ? "✅ Got it! I've updated your profile."
+            : "✅ Noted — I'll remember that.";
+          patchedOnChunk(confirmMsg);
+          result = { status: "DONE" };
+        } else if (classification.intent === "MEMORY_DELETE") {
+          // Facts were already removed by the normalizeGoal + updateLongTermMemory
+          // path above (via remove_keys). Just confirm to the user.
+          patchedOnChunk("✅ Done. I've removed that from my memory.");
+          result = { status: "DONE" };
+        }
+
+        session.agentStatus = "🟢 Idle";
+      } catch (memErr) {
+        console.error("[Agent OS] Memory gate error:", memErr);
+        patchedOnChunk(`\n⚠️ Memory error: ${memErr.message}\n`);
+        result = { status: "FAILED" };
+        session.agentStatus = "🔴 Error";
+      }
+    } else if (
       // ─────────────────────────────────────────────────────────────────────────
       classification &&
       (classification.execution_mode === "chat" ||
@@ -1603,12 +1982,24 @@ async function askAgent(args) {
           .join("\n");
 
         const userProfile = shortTerm.getLongTermMemory();
-        const profileCtx =
+        let profileHasData = false;
+        if (userProfile.permanent) {
+          const p = userProfile.permanent;
+          profileHasData =
+            Object.keys(p.user).length > 0 ||
+            Object.keys(p.projects).length > 0 ||
+            Object.keys(p.preferences).length > 0 ||
+            Object.keys(p.relationships).length > 0;
+        } else if (
           userProfile.name ||
-          userProfile.preferences.length > 0 ||
-          userProfile.facts.length > 0
-            ? `\n\nUser Profile & Facts:\n${JSON.stringify(userProfile, null, 2)}`
-            : "";
+          (userProfile.preferences && userProfile.preferences.length > 0)
+        ) {
+          profileHasData = true;
+        }
+
+        const profileCtx = profileHasData
+          ? `\n\nUser Profile & Facts:\n${JSON.stringify(userProfile, null, 2)}`
+          : "";
 
         // ── Intent-aware context & system prompt ──────────────────────────────
         const isChatIntent =
@@ -1629,7 +2020,10 @@ async function askAgent(args) {
               .join("\n")
           : historyCtx;
 
-        const fileCtx = args.workspaceFiles && !isChatIntent ? `\n\nWorkspace Files:\n${args.workspaceFiles.slice(0, 1000)}` : "";
+        const fileCtx =
+          args.workspaceFiles && !isChatIntent
+            ? `\n\nWorkspace Files:\n${args.workspaceFiles.slice(0, 1000)}`
+            : "";
         const messages = [
           {
             role: "user",
@@ -1794,6 +2188,45 @@ async function askAgent(args) {
       });
 
       shortTerm.saveSession(sessionId, updatedSession);
+
+      // ─── Trigger episodic compression if session is growing ──────────────────
+      // Run after every turn so long sessions never bloat unbounded.
+      // compressSession is async; fire-and-forget so it doesn't delay the response.
+      if (updatedSession.messages.length > 15) {
+        require("../memory/shortTerm")
+          .compressSession(sessionId, {
+            minMessages: 15,
+            recentWindow: 6,
+            compressionChunkSize: 10,
+            compressionQuality: 'balanced',
+          })
+          .then((compressedSession) => {
+            // ── Cognitive coherence: tell the agent it compressed ──────────────
+            // The agent now knows its context was summarized, so it won't
+            // reason as if the full raw history still exists in its window.
+            if (compressedSession?.compressionMetadata?.lastCompression) {
+              memoryManager.updateBelief(
+                "last_compression",
+                compressedSession.compressionMetadata.lastCompression,
+                0.9,
+                "compression_complete",
+              );
+              memoryManager.updateBelief(
+                "compressed_message_count",
+                compressedSession.compressionMetadata.messagesCompressed || 0,
+                0.9,
+                "compression_complete",
+              );
+              console.log(
+                `[MemoryManager] Belief updated: last_compression = ${new Date(compressedSession.compressionMetadata.lastCompression).toISOString()}`,
+              );
+            }
+          })
+          .catch((err) =>
+            console.warn('[Agent OS] Background compression failed:', err.message),
+          );
+      }
+      // ────────────────────────────────────────────────────────────────────────
     }
 
     return result;

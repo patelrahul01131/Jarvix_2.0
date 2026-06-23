@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
 export default function DeveloperToolsPanel({ session, messages }) {
-  const devTools = session?.developerTools || [];
+  const devTools = session?.executionLogs || [];
 
   const rawJsonPlans = useMemo(() => devTools.filter(d => d.type === 'plan'), [devTools]);
   const tokenUsages = useMemo(() => devTools.filter(d => d.type === 'tokenUsage'), [devTools]);

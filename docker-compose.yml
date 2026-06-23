@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   langfuse:
     image: langfuse/langfuse:2
@@ -17,6 +15,9 @@ services:
       # Note: 'host.docker.internal' points to your local machine's Postgres
       - DATABASE_URL=postgresql://postgres:123456789@host.docker.internal:5432/langfuse
       - TELEMETRY_ENABLED=false
+
+    healthcheck:
+      disable: true
 
   jarvix:
     build: .

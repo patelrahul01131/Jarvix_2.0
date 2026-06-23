@@ -30,15 +30,15 @@ export default function ContextPanel({ session, messages, isLoading }) {
   }, [messages]);
 
   const loopCount = useMemo(() => {
-    if (!session?.developerTools) return 0;
+    if (!session?.executionLogs) return 0;
     // Count how many plans in a row have been generated without an intermediate user message
     let count = 0;
-    for (let i = session.developerTools.length - 1; i >= 0; i--) {
-      if (session.developerTools[i].type === 'plan') count++;
+    for (let i = session.executionLogs.length - 1; i >= 0; i--) {
+      if (session.executionLogs[i].type === 'plan') count++;
       else break;
     }
     return count;
-  }, [session?.developerTools]);
+  }, [session?.executionLogs]);
 
   return (
     <div className="context-panel" style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '12px' }}>

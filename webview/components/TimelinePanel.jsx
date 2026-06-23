@@ -3,8 +3,8 @@ import { useMemo } from "react";
 export default function TimelinePanel({ session }) {
   const events = useMemo(() => {
     const timelineEvents = [];
-    if (session?.developerTools) {
-      session.developerTools.forEach((tool) => {
+    if (session?.executionLogs) {
+      session.executionLogs.forEach((tool) => {
         if (tool.type === "timeline") {
           timelineEvents.push({
             time: tool.timestamp,
@@ -23,7 +23,7 @@ export default function TimelinePanel({ session }) {
       });
     }
     return timelineEvents;
-  }, [session?.developerTools]);
+  }, [session?.executionLogs]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px", padding: "12px" }}>

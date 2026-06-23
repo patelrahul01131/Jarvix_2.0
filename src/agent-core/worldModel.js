@@ -1,42 +1,60 @@
+'use strict';
+
 /**
  * The Deep World Model
- * Represents the agent's internalized, temporally-aware, and causally-linked 
+ *
+ * Represents the agent's internalized, temporally-aware, and causally-linked
  * understanding of the software environment.
+ *
+ * Persisted format (session.worldModelData):
+ * {
+ *   "nodes": {
+ *     "shortTerm.js": {
+ *       "lastModified": 1719239900000,
+ *       "lastTool": "fs.writeFile",
+ *       "hash": "af39d2a",
+ *       "status": "success",
+ *       "confidence": 95
+ *     }
+ *   },
+ *   "edges": [
+ *     { "from": "fs.writeFile", "to": "shortTerm.js", "timestamp": 1719239900000, "success": true }
+ *   ],
+ *   "semanticAbstractions": {},
+ *   "causalityGraph": {}
+ * }
  */
+
+const crypto = require('crypto');
 
 class DeepWorldModel {
   constructor() {
-    this.semanticAbstractions = {}; // System meaning layer (e.g., "auth.js handles JWT logic")
-    this.causalityGraph = {};       // Dependency graph (A breaks if B changes)
-    this.temporalState = [];        // Action history (when things changed and why)
-    this.confidenceScores = {};     // How sure the agent is about a module's state (0-100)
+    this.semanticAbstractions = {}; // System meaning layer
+    this.causalityGraph       = {}; // Dependency graph (A breaks if B changes)
+    this.temporalState        = []; // Raw action history
+    this.confidenceScores     = {}; // How sure the agent is about a module (0–100)
+
+    // Spec-aligned flat structures (used for serialization & prompt injection)
+    this.nodes = {}; // { [moduleId]: { lastModified, lastTool, hash, status, confidence } }
+    this.edges = []; // [{ from, to, timestamp, success }]
   }
 
-  // ─── Semantic Abstraction Layer ─────────────────────────────────────────
-  /**
-   * Tracks the system meaning, what modules do, system behavior intent, and architecture roles.
-   */
+  // ─── Semantic Abstraction Layer ─────────────────────────────────────────────
   updateSemanticAbstraction(moduleId, { purpose, intent, roles }) {
     if (!this.semanticAbstractions[moduleId]) {
-      this.semanticAbstractions[moduleId] = { purpose: "", intent: "", roles: [] };
+      this.semanticAbstractions[moduleId] = { purpose: '', intent: '', roles: [] };
     }
     if (purpose) this.semanticAbstractions[moduleId].purpose = purpose;
-    if (intent) this.semanticAbstractions[moduleId].intent = intent;
-    if (roles) this.semanticAbstractions[moduleId].roles = roles;
-
-    // Reset confidence because we learned something new or updated our belief
-    this.updateConfidence(moduleId, 80); 
+    if (intent)  this.semanticAbstractions[moduleId].intent  = intent;
+    if (roles)   this.semanticAbstractions[moduleId].roles   = roles;
+    this.updateConfidence(moduleId, 80);
   }
 
   getSemanticAbstraction(moduleId) {
     return this.semanticAbstractions[moduleId] || null;
   }
 
-  // ─── Causal Relationships (Dependency Graph Engine) ─────────────────────
-  /**
-   * Tracks that targetModule depends on sourceModule.
-   * If sourceModule changes, targetModule might break.
-   */
+  // ─── Causal Relationships (Dependency Graph Engine) ─────────────────────────
   addDependency(sourceModule, targetModule) {
     if (!this.causalityGraph[sourceModule]) {
       this.causalityGraph[sourceModule] = { impacts: new Set(), dependsOn: new Set() };
@@ -48,85 +66,118 @@ class DeepWorldModel {
     this.causalityGraph[targetModule].dependsOn.add(sourceModule);
   }
 
-  /**
-   * Returns a list of all modules that might break if the given module is changed.
-   */
   getImpactedModules(moduleId) {
     if (!this.causalityGraph[moduleId]) return [];
     return Array.from(this.causalityGraph[moduleId].impacts);
   }
 
-  // ─── Temporal State ─────────────────────────────────────────────────────
+  // ─── Temporal State ─────────────────────────────────────────────────────────
   /**
-   * Tracks when things changed to construct an action history graph.
+   * Record a tool action against a module.
+   * Updates the flat nodes/edges spec-format alongside the raw temporalState.
+   *
+   * @param {string} moduleId      - File path or module name
+   * @param {string} action        - Human-readable action label
+   * @param {string} toolUsed      - Tool name (e.g. "fs.writeFile")
+   * @param {string} resultSummary - "success" | "failed" | descriptive string
+   * @param {string} [contentHash] - Optional SHA-1 of the file after the change
    */
-  recordChange(moduleId, action, toolUsed, resultSummary) {
-    this.temporalState.push({
-      timestamp: Date.now(),
-      moduleId,
-      action,
-      toolUsed,
-      resultSummary
-    });
-    
-    // A recent change reduces confidence in dependent modules
+  recordChange(moduleId, action, toolUsed, resultSummary, contentHash) {
+    const ts      = Date.now();
+    const success = !resultSummary?.toLowerCase().includes('fail');
+    const hash    = contentHash || _shortHash(moduleId + ts);
+
+    // Raw temporal log (unchanged behaviour)
+    this.temporalState.push({ timestamp: ts, moduleId, action, toolUsed, resultSummary });
+
+    // Spec-format node upsert
+    this.nodes[moduleId] = {
+      lastModified: ts,
+      lastTool:     toolUsed,
+      hash,
+      status:       success ? 'success' : 'failed',
+      confidence:   success ? 100 : Math.max(0, (this.confidenceScores[moduleId] || 50) - 20),
+    };
+
+    // Spec-format edge
+    this.edges.push({ from: toolUsed, to: moduleId, timestamp: ts, success });
+
+    // Cap edges to last 200 to avoid unbounded growth
+    if (this.edges.length > 200) this.edges = this.edges.slice(-200);
+
+    // Propagate confidence to dependents
     const impacted = this.getImpactedModules(moduleId);
     for (const dep of impacted) {
       this.updateConfidence(dep, Math.max(0, (this.confidenceScores[dep] || 100) - 30));
     }
-    
-    // Changing the module itself sets confidence high because we just verified it
-    this.updateConfidence(moduleId, 100);
+    this.updateConfidence(moduleId, success ? 100 : 40);
   }
 
   getHistory(moduleId) {
-    return this.temporalState.filter(entry => entry.moduleId === moduleId);
+    return this.temporalState.filter(e => e.moduleId === moduleId);
   }
 
-  // ─── Confidence Scores ──────────────────────────────────────────────────
-  /**
-   * Tracks how sure the agent is about the codebase state.
-   */
+  // ─── Confidence Scores ──────────────────────────────────────────────────────
   updateConfidence(moduleId, score) {
     this.confidenceScores[moduleId] = Math.max(0, Math.min(100, score));
+    // Keep node in sync
+    if (this.nodes[moduleId]) {
+      this.nodes[moduleId].confidence = this.confidenceScores[moduleId];
+    }
   }
 
   getConfidence(moduleId) {
     return this.confidenceScores[moduleId] !== undefined ? this.confidenceScores[moduleId] : 0;
   }
 
-  // ─── Export/Import ──────────────────────────────────────────────────────
+  // ─── Export / Import ────────────────────────────────────────────────────────
   serialize() {
     const serializedCausality = {};
     for (const [key, value] of Object.entries(this.causalityGraph)) {
       serializedCausality[key] = {
-        impacts: Array.from(value.impacts),
-        dependsOn: Array.from(value.dependsOn)
+        impacts:   Array.from(value.impacts),
+        dependsOn: Array.from(value.dependsOn),
       };
     }
+
     return {
+      // Spec-format flat structures
+      nodes: this.nodes,
+      edges: this.edges,
+      // Deep internals (for full fidelity restore)
       semanticAbstractions: this.semanticAbstractions,
-      causalityGraph: serializedCausality,
-      temporalState: this.temporalState,
-      confidenceScores: this.confidenceScores
+      causalityGraph:       serializedCausality,
+      temporalState:        this.temporalState,
+      confidenceScores:     this.confidenceScores,
     };
   }
 
   deserialize(data) {
     if (!data) return;
+
+    // Spec-format
+    this.nodes = data.nodes || {};
+    this.edges = data.edges || [];
+
+    // Deep internals
     this.semanticAbstractions = data.semanticAbstractions || {};
-    this.temporalState = data.temporalState || [];
-    this.confidenceScores = data.confidenceScores || {};
-    
+    this.temporalState        = data.temporalState        || [];
+    this.confidenceScores     = data.confidenceScores     || {};
+
     if (data.causalityGraph) {
       for (const [key, value] of Object.entries(data.causalityGraph)) {
         this.causalityGraph[key] = {
-          impacts: new Set(value.impacts || []),
-          dependsOn: new Set(value.dependsOn || [])
+          impacts:   new Set(value.impacts   || []),
+          dependsOn: new Set(value.dependsOn || []),
         };
       }
     }
   }
+}
+
+// ─── Utility: short deterministic hash from a string ───────────────────────────
+function _shortHash(str) {
+  return crypto.createHash('sha1').update(String(str)).digest('hex').slice(0, 7);
 }
 
 module.exports = DeepWorldModel;

@@ -12,7 +12,7 @@ const TOOL_REGISTRY = {
       args: "array", // Array of string arguments
       cwd: "string?", // Optional relative path to run the command in
     },
-    allowedCommands: ["npm", "node", "git", "npx"],
+    allowedCommands: ["npm", "node", "git", "npx", "python", "python3", "py", "pip", "uvicorn"],
     cannotCreateDirectories: true,
     risk: "medium",
   },
