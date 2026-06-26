@@ -6,57 +6,78 @@
 
 const TOOL_REGISTRY = {
   "terminal.exec": {
-    description: "Run safe CLI commands. You must provide the base command and an array of arguments. NEVER wrap commands in 'cmd.exe', 'powershell', or 'bash'. Just use the base command directly (e.g., cmd='npm', args=['init', '-y']).",
+    description:
+      "Run safe CLI commands. You must provide the base command and an array of arguments. NEVER wrap commands in 'cmd.exe', 'powershell', or 'bash'. Just use the base command directly (e.g., cmd='npm', args=['init', '-y']).",
     schema: {
       cmd: "string", // Must be one of allowedCommands
       args: "array", // Array of string arguments
       cwd: "string?", // Optional relative path to run the command in
     },
-    allowedCommands: ["npm", "node", "git", "npx", "python", "python3", "py", "pip", "uvicorn"],
+    allowedCommands: [
+      "npm",
+      "node",
+      "git",
+      "npx",
+      "python",
+      "python3",
+      "py",
+      "pip",
+      "uvicorn",
+    ],
     cannotCreateDirectories: true,
     risk: "medium",
   },
   "fs.createDirectory": {
-    description: "Create a new directory (and any necessary parent directories).",
+    description:
+      "Create a new directory (and any necessary parent directories).",
     schema: {
-      path: "string" // Relative path to create
+      path: "string", // Relative path to create
     },
-    risk: "low"
+    risk: "low",
   },
-  "scaffold_project": {
-    description: "Initialize a new project using standard templates without manually running shell scripts. Supported templates: 'react' (create-react-app), 'vite' (create-vite), 'next' (create-next-app), 'express' (express-generator), or 'node' (npm init -y).",
+  scaffold_project: {
+    description:
+      "Initialize a new project using standard templates without manually running shell scripts. Supported templates: 'react' (create-react-app), 'vite' (create-vite), 'next' (create-next-app), 'express' (express-generator), or 'node' (npm init -y).",
     schema: {
       template: "string", // e.g. 'react', 'vite', 'next', 'express', 'node'
-      path: "string" // relative path where to create the project
+      path: "string", // relative path where to create the project
     },
-    risk: "medium"
+    risk: "medium",
   },
-  "npm_manager": {
-    description: "Manage NPM dependencies. Automatically runs `npm install` inside the target directory.",
+  npm_manager: {
+    description:
+      "Manage NPM dependencies. Automatically runs `npm install` inside the target directory.",
     schema: {
       path: "string", // relative path to the directory containing package.json
-      packages: "array?" // Optional array of packages to install (e.g. ['express', 'cors']). If empty, runs `npm install`.
+      packages: "array?", // Optional array of packages to install (e.g. ['express', 'cors']). If empty, runs `npm install`.
     },
-    risk: "medium"
+    risk: "medium",
   },
   "fs.writeFile": {
-    description: "Write content to a new file. Parent directories are automatically created if they don't exist. Do not use terminal commands like mkdir.",
+    description:
+      "Write content to a new file. Parent directories are automatically created if they don't exist. Do not use terminal commands like mkdir.",
     schema: {
       path: "string",
       content: "string",
     },
     risk: "low",
   },
+  "fs.createFile": {
+    description: "Alias for fs.writeFile.",
+    schema: { path: "string", content: "string", overwrite: "boolean?" },
+    risk: "low",
+  },
 
   "fs.editFileLines": {
-    description: "Edit an existing file by replacing a specific range of lines. Line numbers are 1-indexed. newCode will replace all lines from startLine to endLine inclusive.",
+    description:
+      "Edit an existing file by replacing a specific range of lines. Line numbers are 1-indexed. newCode will replace all lines from startLine to endLine inclusive.",
     schema: {
       path: "string",
       startLine: "number",
       endLine: "number",
-      newCode: "string"
+      newCode: "string",
     },
-    risk: "low"
+    risk: "low",
   },
   "fs.deleteFile": {
     description: "Delete an existing file or directory.",
@@ -66,9 +87,10 @@ const TOOL_REGISTRY = {
     risk: "high",
   },
   "fs.renameFile": {
-    description: "Rename or move a file or directory. path is the current relative path, newPath is the new relative path.",
+    description:
+      "Rename or move a file or directory. oldPath is the current relative path, newPath is the new relative path.",
     schema: {
-      path: "string",
+      oldPath: "string",
       newPath: "string",
     },
     risk: "medium",
@@ -80,14 +102,17 @@ const TOOL_REGISTRY = {
     },
     risk: "low",
   },
-  "list_dir": {
-    description: "List contents of a directory.",
-    schema: {
-      path: "string",
-    },
+  list_dir: {
+    description: "List the contents of a directory.",
+    schema: { path: "string?" },
     risk: "low",
   },
-  "grep_search": {
+  "fs.readdir": {
+    description: "Alias for list_dir. List the contents of a directory.",
+    schema: { path: "string?" },
+    risk: "low",
+  },
+  grep_search: {
     description: "Search for a string across files in a directory.",
     schema: {
       query: "string",
@@ -95,10 +120,32 @@ const TOOL_REGISTRY = {
     },
     risk: "low",
   },
-  "response": {
+  response: {
     description: "Respond to the user or finalize a task.",
     schema: {
       content: "string",
+    },
+    risk: "low",
+  },
+  ask_user_for_input: {
+    description: "Alias for response. Ask the user for clarifying information.",
+    schema: {
+      content: "string",
+    },
+    risk: "low",
+  },
+  user_prompt: {
+    description:
+      "Alias for response. Present information or ask the user a question.",
+    schema: {
+      content: "string",
+    },
+    risk: "low",
+  },
+  google_search: {
+    description: "Search the web and return the top results.",
+    schema: {
+      query: "string",
     },
     risk: "low",
   },

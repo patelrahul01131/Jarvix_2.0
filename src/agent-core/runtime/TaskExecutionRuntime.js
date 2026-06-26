@@ -20,6 +20,32 @@ const Verifier = require("./Verifier");
 const { runExecutor } = require("../executor");
 const RollbackManager = require("../rollback_manager");
 
+class PauseManager {
+  constructor() {
+    this.waiters = [];
+    this.isPaused = false;
+  }
+  pause() {
+    this.isPaused = true;
+  }
+  resume() {
+    this.isPaused = false;
+    const currentWaiters = [...this.waiters];
+    this.waiters = [];
+    currentWaiters.forEach(resolve => resolve());
+  }
+  waitForResume() {
+    return new Promise(resolve => {
+      if (!this.isPaused) {
+        resolve();
+      } else {
+        this.waiters.push(resolve);
+      }
+    });
+  }
+}
+
+
 // ── Runtime execution states ───────────────────────────────────────────────────
 const RUNTIME_STATE = {
   IDLE: "IDLE",
@@ -49,9 +75,9 @@ class TaskExecutionRuntime {
     this.state = RUNTIME_STATE.IDLE;
     this.planId = `plan_${Date.now()}`;
     this.currentTask = null;
+    this.pauseManager = new PauseManager();
     this._pauseSignal = false; // Set to true by pauseAndModify()
     this._abortSignal = false; // Set to true by abort()
-    this._pauseResolve = null; // Promise resolver for pause/resume handshake
   }
 
   // ── Public API ───────────────────────────────────────────────────────────────
@@ -120,6 +146,7 @@ class TaskExecutionRuntime {
       // ── File Permission Pause ──────────────────────────────────────────────
       const writingTools = [
         "fs.writeFile",
+        "fs.createFile",
         "fs.editFile",
         "fs.editFileLines",
         "fs.deleteFile",
@@ -423,11 +450,11 @@ class TaskExecutionRuntime {
     this._resumeActionStatus = actionStatus;
     if (modifiedSteps && modifiedSteps.length > 0) {
       // Replace remaining pending steps with the user's edits
-      const pendingIds = this.taskQueue.queue
+      const pendingIds = new Set(this.taskQueue.queue
         .filter((t) => t.status === TASK_STATUS.PENDING)
-        .map((t) => t.id);
+        .map((t) => t.id));
       this.taskQueue.queue = this.taskQueue.queue.filter(
-        (t) => !pendingIds.includes(t.id),
+        (t) => !pendingIds.has(t.id),
       );
       modifiedSteps.forEach((step, i) => {
         this.taskQueue.enqueue(
@@ -437,10 +464,7 @@ class TaskExecutionRuntime {
         );
       });
     }
-    if (this._pauseResolve) {
-      this._pauseResolve();
-      this._pauseResolve = null;
-    }
+    this.pauseManager.resume();
   }
 
   /**
@@ -448,7 +472,7 @@ class TaskExecutionRuntime {
    */
   abort() {
     this._abortSignal = true;
-    if (this._pauseResolve) this._pauseResolve(); // unblock any pause wait
+    this.pauseManager.resume(); // unblock any pause wait
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
@@ -483,11 +507,16 @@ class TaskExecutionRuntime {
     return new Promise((resolve, reject) => {
       let done = false;
 
-      // 2. AbortSignal Listener for Safe Rollback
+      // 2. Local AbortController to stop executor immediately on timeout
+      const controller = new AbortController();
+      const stepArgs = { ...this.args, signal: controller.signal };
+
+      // 3. AbortSignal Listener for Safe Rollback
       const abortHandler = () => {
         if (!done) {
           done = true;
           clearTimeout(timer);
+          controller.abort(new Error(`TASK_ABORTED`));
 
           if (backupCreated && targetPath) {
             try {
@@ -518,6 +547,7 @@ class TaskExecutionRuntime {
       const timer = setTimeout(() => {
         if (!done) {
           done = true;
+          controller.abort(new Error(`TASK_TIMEOUT`));
           if (this.args.signal)
             this.args.signal.removeEventListener("abort", abortHandler);
           reject(
@@ -533,7 +563,7 @@ class TaskExecutionRuntime {
         {
           /* minimal context */
         },
-        this.args,
+        stepArgs,
       )
         .then((result) => {
           if (!done) {
@@ -615,9 +645,8 @@ class TaskExecutionRuntime {
    * @returns {Promise<void>}
    */
   _waitForResume() {
-    return new Promise((resolve) => {
-      this._pauseResolve = resolve;
-    });
+    this.pauseManager.pause();
+    return this.pauseManager.waitForResume();
   }
 
   /**

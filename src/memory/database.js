@@ -1,6 +1,5 @@
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const path = require("path");
+const fs = require("fs");
 
 /**
  * SQLite Database Manager
@@ -8,20 +7,47 @@ const fs = require('fs');
  */
 class DatabaseManager {
   constructor(dbPath) {
-    if (!dbPath) {
-      // Default to the Jarvix extension storage directory or workspace fallback
-      const dir = path.join(process.cwd(), '.jarvix');
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      dbPath = path.join(dir, 'memory.sqlite');
+    this._explicitDbPath = dbPath || null; // If provided at construction, use directly
+    this.db = null;
+    this._initialized = false;
+  }
+
+  _getDbPath() {
+    if (this._explicitDbPath) return this._explicitDbPath;
+    // Resolve workspace root lazily — by the time any query runs, workspace is open
+    let root = process.env.JARVIX_WORKSPACE_ROOT || process.cwd();
+    try {
+      const { getWorkspaceRoot } = require("../tools/fileSystem");
+      const wsRoot = getWorkspaceRoot();
+      if (wsRoot) root = wsRoot;
+    } catch (e) {
+      // Fallback to env var / cwd
     }
-    
-    this.db = new Database(dbPath, { verbose: null });
-    this.db.pragma('journal_mode = WAL'); // Better concurrency
-    
-    this._initializeSchema();
+    const dir = path.join(root, ".jarvix");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, "memory.sqlite");
+  }
+
+  _ensureInit() {
+    if (this._initialized) return;
+    this._initialized = true;
+    const dbPath = this._getDbPath();
+    try {
+      const Database = require("better-sqlite3");
+      this.db = new Database(dbPath, { verbose: null });
+      this.db.pragma("journal_mode = WAL");
+      this._initializeSchema();
+    } catch (err) {
+      console.warn(
+        "[DatabaseManager] better-sqlite3 failed to load (likely ABI mismatch). Running without local SQLite memory.",
+        err.message,
+      );
+      this.db = null;
+    }
   }
 
   _initializeSchema() {
+    if (!this.db) return;
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS beliefs (
         key TEXT PRIMARY KEY,
@@ -73,6 +99,8 @@ class DatabaseManager {
 
   // --- Beliefs ---
   upsertBelief(belief) {
+    this._ensureInit();
+    if (!this.db) return;
     const stmt = this.db.prepare(`
       INSERT INTO beliefs (key, current_value, confidence, history_json, superseded_json, last_verified)
       VALUES (@key, @currentValue, @confidence, @history, @superseded, @lastVerified)
@@ -83,24 +111,29 @@ class DatabaseManager {
         superseded_json = excluded.superseded_json,
         last_verified = excluded.last_verified
     `);
-    
+
     stmt.run({
       key: belief.key,
-      currentValue: typeof belief.currentValue === 'string' ? belief.currentValue : JSON.stringify(belief.currentValue),
+      currentValue:
+        typeof belief.currentValue === "string"
+          ? belief.currentValue
+          : JSON.stringify(belief.currentValue),
       confidence: belief.confidence,
       history: JSON.stringify(belief.history),
       superseded: JSON.stringify(belief.superseded),
-      lastVerified: belief.lastVerified
+      lastVerified: belief.lastVerified,
     });
   }
 
   // --- Journal Events ---
   insertJournalEvent(event) {
+    this._ensureInit();
+    if (!this.db) return;
     const stmt = this.db.prepare(`
       INSERT INTO journal_events (id, goal_id, timestamp, action_json, before_state_json, after_state_json, result_json)
       VALUES (@id, @goalId, @timestamp, @action, @beforeState, @afterState, @result)
     `);
-    
+
     stmt.run({
       id: event.id,
       goalId: event.goalId,
@@ -108,20 +141,59 @@ class DatabaseManager {
       action: JSON.stringify(event.action),
       beforeState: JSON.stringify(event.beforeState),
       afterState: JSON.stringify(event.afterState),
-      result: JSON.stringify(event.result)
+      result: JSON.stringify(event.result),
     });
   }
 
   // --- Snapshots ---
   saveSnapshot(snapshotJson) {
-    const stmt = this.db.prepare(`INSERT INTO state_snapshots (timestamp, snapshot_json) VALUES (?, ?)`)
+    this._ensureInit();
+    if (!this.db) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO state_snapshots (timestamp, snapshot_json) VALUES (?, ?)`,
+    );
     stmt.run(new Date().toISOString(), snapshotJson);
   }
 
   getLatestSnapshot() {
-    const stmt = this.db.prepare(`SELECT * FROM state_snapshots ORDER BY id DESC LIMIT 1`)
+    this._ensureInit();
+    if (!this.db) return null;
+    const stmt = this.db.prepare(
+      `SELECT * FROM state_snapshots ORDER BY id DESC LIMIT 1`,
+    );
     return stmt.get();
+  }
+
+  close() {
+    if (this.db) {
+      try {
+        this.db.close();
+        console.log(
+          "[DatabaseManager] SQLite database connection closed cleanly.",
+        );
+      } catch (err) {
+        console.warn(
+          "[DatabaseManager] Failed to close SQLite database connection:",
+          err.message,
+        );
+      }
+      this.db = null;
+      this._initialized = false;
+    }
   }
 }
 
-module.exports = DatabaseManager;
+const dbManager = new DatabaseManager();
+
+// Register process teardown cleanups to release SQLite lock on reload/exit
+process.on("exit", () => dbManager.close());
+process.on("SIGINT", () => {
+  dbManager.close();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  dbManager.close();
+  process.exit(0);
+});
+
+module.exports = { DatabaseManager, dbManager };

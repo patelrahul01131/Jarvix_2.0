@@ -1,4 +1,4 @@
-const DatabaseManager = require("../memory/database");
+const { DatabaseManager } = require("../memory/database");
 
 /**
  * State Serializer

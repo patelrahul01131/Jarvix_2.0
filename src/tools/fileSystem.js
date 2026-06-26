@@ -11,13 +11,19 @@ const fs = require("fs");
 const path = require("path");
 
 function getWorkspaceRoot() {
+  // 1. VS Code API (works inside Extension Host)
   const folders = vscode.workspace.workspaceFolders;
-  console.log(
-    "[DEBUG] getWorkspaceRoot called. vscode.workspace.workspaceFolders:",
-    JSON.stringify(folders),
-  );
-  if (!folders || folders.length === 0) return null;
-  return folders[0].uri.fsPath;
+  if (folders && folders.length > 0) {
+    return folders[0].uri.fsPath;
+  }
+  // 2. Env var set by extension.js activate() or server.js bootstrap.
+  //    Only use it if it's an actual absolute path (not a placeholder like "root").
+  const envRoot = process.env.JARVIX_WORKSPACE_ROOT;
+  if (envRoot && path.isAbsolute(envRoot)) {
+    return envRoot;
+  }
+  // 3. Fall back to current working directory (correct when running via nodemon)
+  return process.cwd();
 }
 
 function getLanguageFromExt(ext) {
@@ -91,6 +97,8 @@ function listWorkspaceFiles() {
 function readFileFromWorkspace(filePath) {
   const root = getWorkspaceRoot();
   if (!root) throw new Error("No workspace folder open.");
+  console.log(`[DEBUG] readFileFromWorkspace called. root: ${root}`);
+  console.log(`[DEBUG] readFileFromWorkspace called. filePath: ${filePath}`);
   const fullPath = path.isAbsolute(filePath)
     ? filePath
     : path.join(root, filePath);
@@ -117,6 +125,8 @@ function readFileFromWorkspace(filePath) {
 function writeFileToWorkspace(filePath, content) {
   const root = getWorkspaceRoot();
   if (!root) throw new Error("No workspace folder open.");
+  console.log(`[DEBUG] writeFileToWorkspace called. root: ${root}`);
+  console.log(`[DEBUG] writeFileToWorkspace called. filePath: ${filePath}`);
   const fullPath = path.isAbsolute(filePath)
     ? filePath
     : path.join(root, filePath);
@@ -136,6 +146,8 @@ function writeFileToWorkspace(filePath, content) {
 function editFileLinesWorkspace(filePath, startLine, endLine, newCode) {
   const root = getWorkspaceRoot();
   if (!root) throw new Error("No workspace folder open.");
+  console.log(`[DEBUG] editFileLinesWorkspace called. root: ${root}`);
+  console.log(`[DEBUG] editFileLinesWorkspace called. filePath: ${filePath}`);
   const fullPath = path.isAbsolute(filePath)
     ? filePath
     : path.join(root, filePath);
@@ -151,21 +163,23 @@ function editFileLinesWorkspace(filePath, startLine, endLine, newCode) {
   }
 
   const content = fs.readFileSync(fullPath, "utf8");
-  const lines = content.split('\n');
-  
+  const lines = content.split("\n");
+
   if (startLine < 1 || startLine > lines.length || endLine < startLine) {
-    throw new Error(`Invalid line range: ${startLine}-${endLine}. File has ${lines.length} lines.`);
+    throw new Error(
+      `Invalid line range: ${startLine}-${endLine}. File has ${lines.length} lines.`,
+    );
   }
 
   // 1-indexed to 0-indexed
   const startIdx = startLine - 1;
   const deleteCount = endLine - startLine + 1;
-  
+
   // Splice out the old lines and insert the new lines
-  const newLines = newCode.split('\n');
+  const newLines = newCode.split("\n");
   lines.splice(startIdx, deleteCount, ...newLines);
-  
-  const updatedContent = lines.join('\n');
+
+  const updatedContent = lines.join("\n");
   fs.writeFileSync(fullPath, updatedContent, "utf8");
   return fullPath;
 }
@@ -173,6 +187,8 @@ function editFileLinesWorkspace(filePath, startLine, endLine, newCode) {
 function fileExistsInWorkspace(filePath) {
   const root = getWorkspaceRoot();
   if (!root) return false;
+  console.log(`[DEBUG] fileExistsInWorkspace called. root: ${root}`);
+  console.log(`[DEBUG] fileExistsInWorkspace called. filePath: ${filePath}`);
   const fullPath = path.isAbsolute(filePath)
     ? filePath
     : path.join(root, filePath);
@@ -199,9 +215,13 @@ async function deleteFileFromWorkspace(filePath) {
 
   if (fs.existsSync(fullPath)) {
     try {
-      await vscode.workspace.fs.delete(vscode.Uri.file(fullPath), { useTrash: true });
+      await vscode.workspace.fs.delete(vscode.Uri.file(fullPath), {
+        useTrash: true,
+      });
+      console.log(`[DEBUG] File deleted: ${fullPath}`);
     } catch (e) {
       fs.unlinkSync(fullPath);
+      console.log(`[DEBUG] File deleted: ${fullPath}`);
     }
     return true;
   }
@@ -235,7 +255,13 @@ function executeWriteFile(params) {
 
 function executeEditFileLines(params) {
   try {
-    const writtenPath = editFileLinesWorkspace(params.filePath, params.startLine, params.endLine, params.newCode);
+    const writtenPath = editFileLinesWorkspace(
+      params.filePath,
+      params.startLine,
+      params.endLine,
+      params.newCode,
+    );
+    console.log(`[DEBUG] File edited: ${writtenPath}`);
     return {
       success: true,
       stdout: `Successfully edited lines ${params.startLine}-${params.endLine} in ${writtenPath}`,

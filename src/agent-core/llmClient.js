@@ -14,9 +14,9 @@ async function callLLM({ messages, system, model, provider, onChunk, signal }) {
   if (trace) {
     generation = trace.generation({
       name: "llm-completion",
-      model: model || "unknown",
-      modelParameters: { provider },
-      messages: [{ role: "system", content: system }, ...(messages || [])],
+      model: "llama-3.1-8b-instant",
+      modelParameters: { provider: "groq" },
+      input: [{ role: "system", content: system }, ...(messages || [])],
     });
   }
 
@@ -132,4 +132,41 @@ async function callLLM({ messages, system, model, provider, onChunk, signal }) {
   });
 }
 
-module.exports = { callLLM };
+/**
+ * callLLM with exponential backoff retry for HTTP 429 rate-limit errors.
+ * Waits 2s → 4s → 8s before giving up (3 retries total).
+ */
+async function callLLMWithRetry(params, _attempt = 0) {
+  const MAX_RETRIES = 5;
+  const BASE_DELAY_MS = 2000;
+
+  try {
+    return await callLLM(params);
+  } catch (err) {
+    const is429 =
+      err.message &&
+      (err.message.includes("429") ||
+        err.message.toLowerCase().includes("rate limit") ||
+        err.message.toLowerCase().includes("too many requests") ||
+        err.message.toLowerCase().includes("rate_limit"));
+
+    if (is429 && _attempt < MAX_RETRIES) {
+      const delay = BASE_DELAY_MS * Math.pow(2, _attempt); // 2s, 4s, 8s, 16s, 32s
+      console.warn(
+        `[LLMClient] HTTP 429 rate-limited by provider. Retrying in ${delay / 1000}s (attempt ${_attempt + 1}/${MAX_RETRIES})...`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      return callLLMWithRetry(params, _attempt + 1);
+    }
+
+    if (is429) {
+      throw new Error(
+        `AI Provider Rate Limit (HTTP 429) exhausted. Please wait a minute or choose a different model provider in settings. Detail: ${err.message}`,
+      );
+    }
+
+    throw err;
+  }
+}
+
+module.exports = { callLLM: callLLMWithRetry };

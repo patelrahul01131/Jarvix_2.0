@@ -7,6 +7,157 @@ import FileDiffViewer from './FileDiffViewer';
 import CommandPermissionViewer from './CommandPermissionViewer';
 import { useStore } from '../store';
 
+// ─── Collapsible Diff Viewer ────────────────────────────────────────────────
+function DiffViewer({ originalCode = '', newCode = '', isNew = false, isDelete = false }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  const generateDiffLines = () => {
+    const oldLines = (originalCode || '').split('\n');
+    const newLines = (newCode || '').split('\n');
+    
+    if (isNew) {
+      return newLines.map((line, idx) => ({
+        type: 'added',
+        text: line,
+        newNum: idx + 1,
+        prefix: '+'
+      }));
+    }
+    
+    if (isDelete) {
+      return oldLines.map((line, idx) => ({
+        type: 'removed',
+        text: line,
+        oldNum: idx + 1,
+        prefix: '-'
+      }));
+    }
+
+    const diff = [];
+    let i = 0;
+    let j = 0;
+    while (i < oldLines.length || j < newLines.length) {
+      if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+        diff.push({ type: 'unchanged', text: oldLines[i], oldNum: i + 1, newNum: j + 1, prefix: ' ' });
+        i++;
+        j++;
+      } else {
+        let matchOffset = -1;
+        for (let k = 1; k < 10; k++) {
+          if (i + k < oldLines.length && oldLines[i + k] === newLines[j]) {
+            matchOffset = k;
+            break;
+          }
+        }
+        if (matchOffset !== -1) {
+          for (let k = 0; k < matchOffset; k++) {
+            diff.push({ type: 'removed', text: oldLines[i], oldNum: i + 1, prefix: '-' });
+            i++;
+          }
+        } else {
+          if (j < newLines.length) {
+            diff.push({ type: 'added', text: newLines[j], newNum: j + 1, prefix: '+' });
+            j++;
+          } else if (i < oldLines.length) {
+            diff.push({ type: 'removed', text: oldLines[i], oldNum: i + 1, prefix: '-' });
+            i++;
+          }
+        }
+      }
+    }
+    return diff;
+  };
+
+  const diffLines = isOpen ? generateDiffLines() : [];
+
+  return (
+    <div className="diff-dropdown" style={{ borderTop: '1px solid var(--vscode-widget-border, #333)' }}>
+      <div 
+        onClick={() => setIsOpen(!isOpen)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: '8px 12px',
+          cursor: 'pointer',
+          background: 'rgba(255, 255, 255, 0.02)',
+          userSelect: 'none',
+          fontSize: '12px',
+          fontWeight: 600,
+          color: 'var(--text-muted, #aaa)'
+        }}
+      >
+        <span style={{ marginRight: '6px' }}>{isOpen ? '▼' : '▶'}</span>
+        <span>{isOpen ? 'Hide Diff' : 'Show Diff'}</span>
+      </div>
+      
+      {isOpen && (
+        <div style={{ 
+          maxHeight: '300px', 
+          overflow: 'auto', 
+          fontFamily: 'monospace', 
+          fontSize: '12px', 
+          background: '#151515',
+          borderTop: '1px solid var(--vscode-widget-border, #333)',
+          padding: '4px 0'
+        }}>
+          {diffLines.map((line, idx) => {
+            let bgColor = 'transparent';
+            let textColor = 'var(--foreground, #ccc)';
+            if (line.type === 'added') {
+              bgColor = 'rgba(46, 160, 67, 0.15)';
+              textColor = '#34d399';
+            } else if (line.type === 'removed') {
+              bgColor = 'rgba(248, 113, 113, 0.15)';
+              textColor = '#f87171';
+            }
+            return (
+              <div key={idx} style={{ 
+                display: 'flex', 
+                backgroundColor: bgColor, 
+                color: textColor,
+                lineHeight: '18px',
+                padding: '0 8px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all'
+              }}>
+                <span style={{ 
+                  width: '35px', 
+                  userSelect: 'none', 
+                  color: 'rgba(255,255,255,0.2)', 
+                  textAlign: 'right',
+                  paddingRight: '8px',
+                  display: 'inline-block'
+                }}>
+                  {line.type === 'removed' ? line.oldNum : line.type === 'unchanged' ? line.oldNum : ''}
+                </span>
+                <span style={{ 
+                  width: '35px', 
+                  userSelect: 'none', 
+                  color: 'rgba(255,255,255,0.2)', 
+                  textAlign: 'right',
+                  paddingRight: '8px',
+                  display: 'inline-block'
+                }}>
+                  {line.type === 'added' ? line.newNum : line.type === 'unchanged' ? line.newNum : ''}
+                </span>
+                <span style={{ 
+                  width: '15px', 
+                  userSelect: 'none', 
+                  color: line.type === 'added' ? '#34d399' : line.type === 'removed' ? '#f87171' : 'rgba(255,255,255,0.15)',
+                  display: 'inline-block'
+                }}>
+                  {line.prefix}
+                </span>
+                <span style={{ flex: 1 }}>{line.text}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Custom code block renderer ────────────────────────────────────────────────
 function CodeBlock({ children, className }) {
   const [open, setOpen] = useState(true);
@@ -467,7 +618,88 @@ export default function MessageBubble({
           <MarkdownRenderer content={message.content} isStreaming={isStreaming} />
         )}
 
-        {/* Resolved File edits */}
+        {/* ── Pending File Edits (Accept / Decline) ── */}
+        {isAssistant && message.fileEdits && message.fileEdits.filter(e => e.status === 'pending').length > 0 && (
+          <div className="file-edits-container pending-edits">
+            <div className="file-edits-header">
+              <div className="file-edits-label">📋 Proposed File Changes</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                Review and approve each change
+              </div>
+            </div>
+            {message.fileEdits.map((edit, idx) => {
+              if (edit.status !== 'pending') return null;
+              const fileName = (edit.filePath || edit.path || '').split(/[/\\]/).pop() || '(unnamed)';
+              const isNew = edit.isNew;
+              const isDelete = edit.isDelete;
+              const actionLabel = isDelete ? '🗑️ Delete' : isNew ? '✨ Create' : '✏️ Edit';
+              const actionColor = isDelete ? '#f87171' : isNew ? '#34d399' : '#60a5fa';
+              return (
+                <div key={idx} className="file-edit-proposal-card" style={{
+                  border: '1px solid var(--vscode-widget-border, #444)',
+                  borderRadius: '8px',
+                  marginBottom: '8px',
+                  overflow: 'hidden',
+                  background: 'var(--vscode-editor-background, #1e1e1e)',
+                }}>
+                  {/* File header */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    padding: '8px 12px',
+                    borderBottom: '1px solid var(--vscode-widget-border, #333)',
+                    background: 'rgba(255,255,255,0.03)',
+                  }}>
+                    <span style={{ fontSize: '11px', fontWeight: 600, padding: '2px 7px', borderRadius: '10px', background: actionColor + '22', color: actionColor }}>
+                      {actionLabel}
+                    </span>
+                    <span style={{ fontWeight: 600, fontSize: '13px', fontFamily: 'monospace' }}>{fileName}</span>
+                    <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginLeft: 'auto', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                      {edit.filePath || edit.path}
+                    </span>
+                  </div>
+
+                  {/* Diff dropdown component */}
+                  <DiffViewer 
+                    originalCode={edit.originalCode} 
+                    newCode={edit.newCode} 
+                    isNew={isNew} 
+                    isDelete={isDelete} 
+                  />
+
+                  {/* Action buttons */}
+                  <div style={{
+                    display: 'flex', gap: '8px', padding: '8px 12px',
+                    borderTop: '1px solid var(--vscode-widget-border, #333)',
+                    background: 'rgba(255,255,255,0.02)',
+                  }}>
+                    <button
+                      onClick={() => store.handleAcceptFile(messageIndex, idx)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '6px',
+                        padding: '5px 14px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                        background: '#2ea44f', color: '#fff', fontWeight: 600, fontSize: '12px',
+                      }}
+                    >
+                      ✅ Accept
+                    </button>
+                    <button
+                      onClick={() => store.handleDeclineFile(messageIndex, idx)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '6px',
+                        padding: '5px 14px', borderRadius: '6px', border: '1px solid #f87171', cursor: 'pointer',
+                        background: 'transparent', color: '#f87171', fontWeight: 600, fontSize: '12px',
+                      }}
+                    >
+                      ❌ Decline
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── Resolved File edits (accepted / declined history) ── */}
         {isAssistant && message.fileEdits && message.fileEdits.filter(e => e.status !== 'pending').length > 0 && (
           <div className="file-edits-container">
             <div className="file-edits-header">
@@ -476,9 +708,9 @@ export default function MessageBubble({
             {message.fileEdits.map((edit, idx) => {
               if (edit.status === 'pending') return null;
               return (
-                <div 
-                  key={idx} 
-                  className="artifact-card diff" 
+                <div
+                  key={idx}
+                  className="artifact-card diff"
                   onClick={() => store.setActiveWorkspaceView({ type: 'diff', messageIndex, fileIndex: idx })}
                 >
                   <div className="artifact-icon">📄</div>
@@ -489,8 +721,8 @@ export default function MessageBubble({
                     </div>
                   </div>
                   {edit.status === 'declined' && store.handleUndoDeclineFile && (
-                    <button 
-                      className="batch-btn accept" 
+                    <button
+                      className="batch-btn accept"
                       style={{ marginLeft: 'auto', marginRight: '10px' }}
                       onClick={(e) => {
                         e.stopPropagation();

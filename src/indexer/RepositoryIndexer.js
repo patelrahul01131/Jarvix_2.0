@@ -15,6 +15,7 @@ const fs = require('fs');
 const { listWorkspaceFiles, readFileFromWorkspace, getWorkspaceRoot } = require('../tools/fileSystem.js');
 const { chunkFile } = require('./ChunkManager.js');
 const { embed, embedBatch, EMBEDDING_DIM } = require('./EmbeddingService.js');
+const { DBHealthManager } = require('./DBHealthManager.js');
 
 // LanceDB will be dynamically imported (ESM module)
 let lancedb = null;
@@ -49,17 +50,35 @@ function saveIndexMeta(meta) {
 // ─── Connect to LanceDB ────────────────────────────────────────────────────────
 async function connectDB() {
   if (db) return db;
-  try {
+  
+  const root = getWorkspaceRoot();
+  if (!root) throw new Error('No workspace open');
+  const dbPath = path.join(root, '.jarvix', 'lancedb');
+
+  const attemptConnect = async () => {
     if (!lancedb) {
       lancedb = await import('@lancedb/lancedb');
     }
-    const root = getWorkspaceRoot();
-    if (!root) throw new Error('No workspace open');
-    const dbPath = path.join(root, '.jarvix', 'lancedb');
-    db = await lancedb.connect(dbPath);
+    return await lancedb.connect(dbPath);
+  };
+
+  try {
+    db = await attemptConnect();
     return db;
   } catch (err) {
-    console.error('[RepositoryIndexer] LanceDB connect failed:', err.message);
+    console.warn('[RepositoryIndexer] LanceDB connect failed, checking health...', err.message);
+    const health = DBHealthManager.checkHealth();
+    if (!health.healthy) {
+      console.log(`[RepositoryIndexer] DB looks unhealthy (${health.reason}). Wiping and retrying...`);
+      await DBHealthManager.wipeDB();
+      try {
+        db = await attemptConnect();
+        return db;
+      } catch (retryErr) {
+        console.error('[RepositoryIndexer] LanceDB retry failed:', retryErr.message);
+        throw retryErr;
+      }
+    }
     throw err;
   }
 }
@@ -146,11 +165,11 @@ async function removeFile(filePath) {
  * Index the entire workspace incrementally.
  * Only re-indexes files that have changed since last index.
  * @param {Function} [onProgress] - Called with (indexed, total, filePath)
- * @returns {Promise<{ indexed: number, skipped: number, total: number }>}
+ * @returns {Promise<{ indexed: number, skipped: number, removed: number, total: number }>}
  */
 async function indexWorkspace(onProgress) {
   const root = getWorkspaceRoot();
-  if (!root) return { indexed: 0, skipped: 0, total: 0 };
+  if (!root) return { indexed: 0, skipped: 0, removed: 0, total: 0 };
 
   const SKIP_EXTENSIONS = new Set([
     'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff', 'woff2', 'ttf', 'eot',
@@ -172,7 +191,11 @@ async function indexWorkspace(onProgress) {
   const meta = loadIndexMeta();
   let indexed = 0;
   let skipped = 0;
+  let removed = 0;
   const total = workspaceFiles.length;
+
+  // Track existing files to detect deleted/moved ones
+  const currentFiles = new Set(workspaceFiles.map(f => f.path.replace(/\\/g, '/')));
 
   for (const wf of workspaceFiles) {
     try {
@@ -199,8 +222,20 @@ async function indexWorkspace(onProgress) {
     }
   }
 
+  // Detect and remove ghost index entries (files in meta but not in workspace)
+  const metaKeys = Object.keys(meta);
+  for (const key of metaKeys) {
+    const normKey = key.replace(/\\/g, '/');
+    if (!currentFiles.has(normKey)) {
+      console.log(`[RepositoryIndexer] Removing deleted/ghost file from index: ${key}`);
+      await removeFile(normKey);
+      delete meta[key];
+      removed++;
+    }
+  }
+
   saveIndexMeta(meta);
-  return { indexed, skipped, total };
+  return { indexed, skipped, removed, total };
 }
 
 // ─── Semantic vector search ────────────────────────────────────────────────────
@@ -228,7 +263,9 @@ async function semanticSearch(query, options = {}) {
     
     // Add simple string filtering if LanceDB supports it (falling back to post-filtering if not)
     // LanceDB node API supports simple SQL WHERE. Let's do post-filtering for safety across versions
-    const rawResults = await lancedbQuery.limit(limit * 3).toArray();
+    // Increase candidate pool significantly to avoid truncation blindspots due to early limits
+    const candidateLimit = limit * 10;
+    const rawResults = await lancedbQuery.limit(candidateLimit).toArray();
     
     // Reranking & Filtering logic
     const filteredResults = rawResults.filter(row => {
@@ -237,7 +274,10 @@ async function semanticSearch(query, options = {}) {
         if (!options.extensions.includes(ext)) return false;
       }
       if (options.directory) {
-        if (!row.filePath.startsWith(options.directory)) return false;
+        // Support normalized paths
+        const normPath = row.filePath.replace(/\\/g, '/');
+        const normDir = options.directory.replace(/\\/g, '/');
+        if (!normPath.startsWith(normDir)) return false;
       }
       return true;
     }).slice(0, limit);

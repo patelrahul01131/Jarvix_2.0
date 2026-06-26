@@ -104,8 +104,11 @@ As a Principal Architect, you have a duty to maintain security standards. If a u
   );
 
   const abortController = new AbortController();
-  req.on("close", () => {
-    // abortController.abort();
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      console.log("[Jarvix] Client disconnected. Aborting upstream LLM.");
+      abortController.abort();
+    }
   });
 
   let apiResponse;
@@ -151,7 +154,11 @@ As a Principal Architect, you have a duty to maintain security standards. If a u
 
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith("data:")) continue;
+      if (!trimmed) continue;
+      if (!trimmed.startsWith("data:")) {
+        console.log("[Jarvix] Ignored non-data line:", trimmed);
+        continue;
+      }
 
       const dataStr = trimmed.replace(/^data:\s*/, "");
       if (dataStr === "[DONE]") {

@@ -26,6 +26,8 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 class DeepWorldModel {
   constructor() {
@@ -37,6 +39,56 @@ class DeepWorldModel {
     // Spec-aligned flat structures (used for serialization & prompt injection)
     this.nodes = {}; // { [moduleId]: { lastModified, lastTool, hash, status, confidence } }
     this.edges = []; // [{ from, to, timestamp, success }]
+
+    // Project-level state architecture
+    this.projectState = {
+      projectType: null,    // 'nodejs' | 'react' | 'nextjs' | 'python' | ...
+      framework: null,      // 'express' | 'fastapi' | ...
+      database: null,       // 'sqlite' | 'postgres' | 'mongodb' | ...
+      authExists: false,
+      testsExist: false,
+      buildPassing: null,
+      packageManager: null, // 'npm' | 'yarn' | 'pnpm'
+      entryPoint: null,     // 'server.js' | 'index.js' | ...
+      lastScanned: null,
+    };
+  }
+
+  // ─── Project Architecture Heuristics ────────────────────────────────────────
+  inferProjectState(workspaceRoot) {
+    if (!workspaceRoot || !fs.existsSync(workspaceRoot)) return;
+    
+    const pkgJsonPath = path.join(workspaceRoot, 'package.json');
+    if (fs.existsSync(pkgJsonPath)) {
+      this.projectState.projectType = 'nodejs';
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+        const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+        
+        if (deps.express) this.projectState.framework = 'express';
+        else if (deps.next) this.projectState.framework = 'nextjs';
+        else if (deps.react || deps['react-dom']) this.projectState.framework = 'react';
+        
+        if (deps.mongoose || deps.mongodb) this.projectState.database = 'mongodb';
+        else if (deps.sequelize || deps.pg || deps.sqlite3 || deps.mysql2 || deps.prisma) this.projectState.database = 'sql';
+        
+        if (deps.passport || deps.jsonwebtoken || deps['next-auth'] || deps.bcrypt) this.projectState.authExists = true;
+        if (deps.jest || deps.mocha || deps.chai || deps.vitest || deps.cypress) this.projectState.testsExist = true;
+        
+        if (fs.existsSync(path.join(workspaceRoot, 'yarn.lock'))) this.projectState.packageManager = 'yarn';
+        else if (fs.existsSync(path.join(workspaceRoot, 'pnpm-lock.yaml'))) this.projectState.packageManager = 'pnpm';
+        else this.projectState.packageManager = 'npm';
+        
+        this.projectState.entryPoint = pkg.main || 'index.js';
+      } catch (e) {
+        // ignore JSON parse errors
+      }
+    } else if (fs.existsSync(path.join(workspaceRoot, 'requirements.txt')) || fs.existsSync(path.join(workspaceRoot, 'pyproject.toml'))) {
+      this.projectState.projectType = 'python';
+      if (fs.existsSync(path.join(workspaceRoot, 'manage.py'))) this.projectState.framework = 'django';
+    }
+    
+    this.projectState.lastScanned = Date.now();
   }
 
   // ─── Semantic Abstraction Layer ─────────────────────────────────────────────
@@ -149,6 +201,7 @@ class DeepWorldModel {
       causalityGraph:       serializedCausality,
       temporalState:        this.temporalState,
       confidenceScores:     this.confidenceScores,
+      projectState:         this.projectState,
     };
   }
 
@@ -163,6 +216,7 @@ class DeepWorldModel {
     this.semanticAbstractions = data.semanticAbstractions || {};
     this.temporalState        = data.temporalState        || [];
     this.confidenceScores     = data.confidenceScores     || {};
+    this.projectState         = data.projectState         || this.projectState;
 
     if (data.causalityGraph) {
       for (const [key, value] of Object.entries(data.causalityGraph)) {

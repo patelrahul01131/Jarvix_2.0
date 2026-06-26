@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const { streamChatCompletion } = require("./bridge");
+const { authenticateToken } = require("../modules/auth/auth_middleware");
 
 const router = express.Router();
 
@@ -10,7 +11,7 @@ router.get("/logo", (req, res) => {
 
 // We will rewire the state logic eventually to use our new Memory system
 // For now, it maps back to the existing sessionStore so the UI doesn't break during migration
-router.post("/state", (req, res) => {
+router.post("/state", authenticateToken, (req, res) => {
   try {
     const { sessionId, state } = req.body;
     // Update to use the new Memory layer
@@ -28,15 +29,15 @@ router.post("/state", (req, res) => {
   }
 });
 
-router.post("/chat", async (req, res) => {
+router.post("/chat", authenticateToken, async (req, res) => {
   try {
     const { messages, system, model, provider } = req.body;
     if (!messages) {
       return res.status(400).json({ error: "Missing messages in body" });
     }
 
-    const selectedProvider = provider || "mistral";
-    const selectedModel = model || "open-mistral-7b";
+    const selectedProvider = "mistral";
+    const selectedModel = "open-mistral-7b";
 
     // Call the bridge to stream response back
     await streamChatCompletion(

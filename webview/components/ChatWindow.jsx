@@ -36,11 +36,9 @@ export default function ChatWindow({
 
   if (!messages.length && !isLoading) {
     return (
-      <div className="chat-window">
+      <div className="chat-window empty">
         <div className="empty-state">
-          <div className="icon">⚡</div>
-          <div className="empty-state-title">Jarvix is ready</div>
-          <div className="empty-state-sub">Pick a model and ask anything</div>
+          {/* Empty state removed as requested */}
         </div>
       </div>
     );

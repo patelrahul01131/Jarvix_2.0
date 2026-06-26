@@ -9,13 +9,16 @@ async function retrieveContext(goal, userProfile, args = {}) {
   // Always include session instructions as they are temporary and highly relevant
   const injected = {
     permanent: { user: {}, projects: {}, preferences: {}, relationships: {} },
-    session: userProfile?.session || { instructions: [], temporary_context: [] }
+    session: userProfile?.session || {
+      instructions: [],
+      temporary_context: [],
+    },
   };
 
   if (!userProfile || !userProfile.permanent) {
     return injected;
   }
-  
+
   // 1. Flatten keys for the LLM to select from
   const flatKeys = [];
   for (const cat of Object.keys(userProfile.permanent)) {
@@ -55,17 +58,25 @@ Output STRICT JSON:
       model: args.model || "gpt-4o",
       provider: args.provider || "openai",
       signal: args.signal || null,
-      onChunk: (c) => { rawOutput += c; }
+      onChunk: (c) => {
+        rawOutput += c;
+      },
     });
 
-    let cleanJson = rawOutput.replace(/```json/gi, "").replace(/```/g, "").trim();
+    let cleanJson = rawOutput
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
     const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
     if (jsonMatch) cleanJson = jsonMatch[0];
-    
+
     const parsed = JSON.parse(cleanJson);
     const retrievedKeys = parsed.retrieved_keys || [];
-    
-    console.log(`[MemoryRetriever] Extracted keys for goal "${goal}":`, retrievedKeys);
+
+    console.log(
+      `[MemoryRetriever] Extracted keys for goal "${goal}":`,
+      retrievedKeys,
+    );
 
     // 2. Rebuild the structured object with only the selected keys
     let keysAdded = 0;
@@ -82,14 +93,21 @@ Output STRICT JSON:
     }
 
     // 3. Fallback logic: If they asked a very broad "Who am I" question and LLM missed it
-    if (keysAdded === 0 && (goal.toLowerCase().includes("who am i") || goal.toLowerCase().includes("profile"))) {
+    if (
+      keysAdded === 0 &&
+      (goal.toLowerCase().includes("who am i") ||
+        goal.toLowerCase().includes("profile"))
+    ) {
       console.log("[MemoryRetriever] Triggered full profile fallback.");
       injected.permanent = userProfile.permanent;
     }
 
     return injected;
   } catch (e) {
-    console.warn("[MemoryRetriever] Retrieval failed, falling back to full memory.", e.message);
+    console.warn(
+      "[MemoryRetriever] Retrieval failed, falling back to full memory.",
+      e.message,
+    );
     // 4. Ultimate fallback on failure: return full memory
     return userProfile;
   }

@@ -90,7 +90,8 @@ async function applyAtomicTransaction(edits, panel) {
     // Rollback: restore all previously written files
     for (const w of written) {
       try {
-        if (w._wasDeleted) {
+        /** @type {any} */ const ww = w;
+        if (ww._wasDeleted) {
           if (w.originalCode != null) {
             await writeAndSync(w.filePath, w.originalCode, panel);
             console.log(
@@ -173,7 +174,54 @@ async function writeAndSync(filePath, code, panel) {
   return absolutePath;
 }
 
+// ─── Ensure all .jarvix subdirs exist in the workspace ────────────────────────
+/**
+ * Creates the full .jarvix directory structure in the active workspace.
+ * Called at extension activation and on workspace folder changes.
+ * Also sets JARVIX_WORKSPACE_ROOT env var so server-side / nodemon code
+ * can call getWorkspaceRoot() correctly without the VS Code API.
+ */
+function ensureJarvixFolders() {
+  try {
+    const { getWorkspaceRoot } = require("./src/tools/fileSystem");
+    const root = getWorkspaceRoot();
+    if (!root) return;
+
+    // Publish workspace root for server-side modules (database.js, context_retriever, etc.)
+    process.env.JARVIX_WORKSPACE_ROOT = root;
+
+    // Create all required subdirectories
+    const subdirs = [
+      ".jarvix",
+      ".jarvix/chats",
+      ".jarvix/lancedb",
+      ".jarvix/checkpoints",
+      ".jarvix/backups",
+      ".jarvix/logs",
+    ];
+    for (const sub of subdirs) {
+      const fullPath = path.join(root, sub);
+      if (!fs.existsSync(fullPath)) {
+        fs.mkdirSync(fullPath, { recursive: true });
+        console.log(`[Jarvix] Created: ${fullPath}`);
+      }
+    }
+  } catch (e) {
+    console.warn("[Jarvix] ensureJarvixFolders failed:", e.message);
+  }
+}
+
 function activate(context) {
+  // ── Ensure .jarvix folder structure exists in the workspace ────────────────
+  ensureJarvixFolders();
+
+  // Re-run when workspace folders change (user opens a different project)
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      ensureJarvixFolders();
+    }),
+  );
+
   const command = vscode.commands.registerCommand("myAgent.open", () => {
     const panel = vscode.window.createWebviewPanel(
       "jarvix",
@@ -190,10 +238,116 @@ function activate(context) {
 
     panel.webview.html = getWebviewContent(panel.webview, context.extensionUri);
 
+    const { eventBus } = require("./src/core/event_bus");
+    const journalSubscription = (event) => {
+      let statusMessage = null;
+      const time = new Date().toLocaleTimeString();
+
+      switch (event.eventType) {
+        case "RequestStarted":
+          statusMessage = `[${time}] 🧠 Initializing Agent OS...`;
+          break;
+        case "PlanningStarted":
+          statusMessage = `[${time}] 🧭 Designing execution plan...`;
+          break;
+        case "PlanningFinished":
+          statusMessage = `[${time}] 📝 Plan generated successfully.`;
+          break;
+        case "ToolStarted":
+          statusMessage = `[${time}] ⚙️ Starting execution: ${event.data.tool}`;
+          break;
+        case "ProposedEditCreated":
+          statusMessage = `[${time}] ✏️ Proposed edit created: ${event.data.filePath} (${event.data.isNew ? "New" : "Modify"})`;
+          break;
+        case "ProposedCommandCreated":
+          statusMessage = `[${time}] 💻 Proposed terminal command: ${event.data.command}`;
+          break;
+        case "ToolSucceeded": {
+          const isFailed = event.data.result && event.data.result.success === false;
+          if (isFailed) {
+            statusMessage = `[${time}] ❌ Action failed. Error: ${event.data.result.stderr || "Execution error."}`;
+          } else {
+            statusMessage = `[${time}] ✅ Action completed successfully!`;
+          }
+          break;
+        }
+        case "ExecutionFinished":
+          statusMessage = event.data.success 
+            ? `[${time}] 🎉 Plan execution completed successfully!`
+            : `[${time}] ⚠️ Plan execution failed.`;
+          break;
+      }
+
+      if (statusMessage) {
+        panel.webview.postMessage({ type: "status", status: statusMessage });
+      }
+
+      panel.webview.postMessage({
+        type: "JOURNAL_EVENT",
+        event
+      });
+    };
+
+    eventBus.on("JournalEvent", journalSubscription);
+
+    panel.onDidDispose(() => {
+      eventBus.off("JournalEvent", journalSubscription);
+    });
+
+    // Approvals Map for chat-mode UI write permission
+    const pendingFileApprovals = new Map();
+    let approvalIdCounter = 1;
+
     // AbortController for stop-generation
     let activeAbortController = null;
 
     panel.webview.onDidReceiveMessage(async (msg) => {
+      const proposeFileWrite = async ({
+        filePath,
+        code,
+        isNew,
+        originalCode,
+        isDelete,
+      }) => {
+        return new Promise((resolve, reject) => {
+          const approvalId = `approval_${approvalIdCounter++}`;
+          pendingFileApprovals.set(approvalId, { resolve, reject });
+
+          const sessions = getAllSessions();
+          const session = sessions[msg.sessionId];
+          if (session) {
+            session.messages.push({
+              role: "assistant",
+              content: `Proposed file actions`,
+              isPlan: false,
+              fileEdits: [
+                {
+                  filePath,
+                  newCode: code,
+                  originalCode,
+                  isNew,
+                  isDelete,
+                  status: "pending",
+                  _approvalId: approvalId,
+                },
+              ],
+            });
+            saveSession(msg.sessionId, session);
+
+            panel.webview.postMessage({
+              type: "sessionsLoaded",
+              sessions: getAllSessions(),
+            });
+            panel.webview.postMessage({
+              type: "reply",
+              sessionId: msg.sessionId,
+              session: getAllSessions()[msg.sessionId],
+            });
+          } else {
+            reject(new Error("Session not found for proposal"));
+          }
+        });
+      };
       async function resumeAgentFallback(questionText) {
         try {
           activeAbortController = new AbortController();
@@ -219,6 +373,7 @@ function activate(context) {
                 sessionId: msg.sessionId,
                 content: partialReply,
               }),
+            proposeFileWrite,
             onFileWrite: async ({ filePath, code, isNew }) => {
               try {
                 await writeAndSync(filePath, code, panel);
@@ -269,7 +424,67 @@ function activate(context) {
           break;
         }
 
+        case "runtimePause": {
+          const rt = activeRuntimes[msg.sessionId];
+          if (rt && typeof rt.pause === "function") {
+            rt.pause();
+            panel.webview.postMessage({
+              type: "status",
+              status: "⏸️ Paused by user.",
+            });
+          } else if (activeAbortController) {
+            // Fallback: for the LangGraph loop, pause isn't available but we can signal status
+            panel.webview.postMessage({
+              type: "status",
+              status: "⏸️ Pause requested (completing current step)...",
+            });
+          }
+          break;
+        }
+
+        case "runtimeResume": {
+          const rt = activeRuntimes[msg.sessionId];
+          if (rt && typeof rt.resume === "function") {
+            rt.resume(msg.modifiedSteps || null);
+            panel.webview.postMessage({
+              type: "status",
+              status: "▶️ Resuming execution...",
+            });
+          }
+          break;
+        }
+
+        case "runtimeAbort": {
+          const rt = activeRuntimes[msg.sessionId];
+          if (rt && typeof rt.abort === "function") {
+            rt.abort();
+          }
+          if (activeAbortController) {
+            activeAbortController.abort();
+            activeAbortController = null;
+          }
+          delete activeRuntimes[msg.sessionId];
+          panel.webview.postMessage({ type: "generationStopped" });
+          const sessForAbort = getAllSessions()[msg.sessionId];
+          if (sessForAbort) {
+            sessForAbort.messages = sessForAbort.messages.filter(
+              (m) => !m.streaming,
+            );
+            saveSession(msg.sessionId, sessForAbort);
+            panel.webview.postMessage({
+              type: "reply",
+              sessionId: msg.sessionId,
+              session: sessForAbort,
+            });
+          }
+          break;
+        }
+
         case "ask": {
+          console.log(
+            "[Jarvix Debug] extension.js received 'ask' message:",
+            msg,
+          );
           try {
             activeAbortController = new AbortController();
             await askAgent({
@@ -306,6 +521,7 @@ function activate(context) {
                 });
               },
 
+              proposeFileWrite,
               onFileWrite: async ({ filePath, code, isNew }) => {
                 try {
                   await writeAndSync(filePath, code, panel);
@@ -354,6 +570,7 @@ function activate(context) {
                   content: `⚠️ **Error:** ${err.message}`,
                   isError: true,
                 });
+                session.agentStatus = "🔴 Error";
                 saveSession(msg.sessionId, session);
               }
             } catch (e) {}
@@ -450,6 +667,7 @@ function activate(context) {
                 });
               },
 
+              proposeFileWrite,
               onFileWrite: async ({ filePath, code, isNew }) => {
                 try {
                   await writeAndSync(filePath, code, panel);
@@ -613,6 +831,23 @@ function activate(context) {
                 type: "sessionsLoaded",
                 sessions: getAllSessions(),
               });
+            } else if (
+              msg._approvalId &&
+              pendingFileApprovals.has(msg._approvalId)
+            ) {
+              // Chat mode approval
+              const pending = pendingFileApprovals.get(msg._approvalId);
+              pending.resolve();
+              pendingFileApprovals.delete(msg._approvalId);
+              panel.webview.postMessage({
+                type: "sessionsLoaded",
+                sessions: getAllSessions(),
+              });
+              panel.webview.postMessage({
+                type: "reply",
+                sessionId: msg.sessionId,
+                session: getAllSessions()[msg.sessionId],
+              });
             } else {
               panel.webview.postMessage({
                 type: "sessionsLoaded",
@@ -623,6 +858,8 @@ function activate(context) {
                 sessionId: msg.sessionId,
                 session: getAllSessions()[msg.sessionId],
               });
+              const resumeMsg = `[TOOL VERIFICATION] User ACCEPTED file action: ${msg.isDelete ? "delete" : msg.isNew ? "create" : "edit"} on ${msg.filePath}`;
+              resumeAgentFallback(resumeMsg);
             }
           } catch (err) {
             vscode.window.showErrorMessage("Action error: " + err.message);
@@ -650,6 +887,23 @@ function activate(context) {
               type: "sessionsLoaded",
               sessions: getAllSessions(),
             });
+          } else if (
+            msg._approvalId &&
+            pendingFileApprovals.has(msg._approvalId)
+          ) {
+            // Chat mode decline
+            const pending = pendingFileApprovals.get(msg._approvalId);
+            pending.reject(new Error("User rejected the file edit."));
+            pendingFileApprovals.delete(msg._approvalId);
+            panel.webview.postMessage({
+              type: "sessionsLoaded",
+              sessions: getAllSessions(),
+            });
+            panel.webview.postMessage({
+              type: "reply",
+              sessionId: msg.sessionId,
+              session: getAllSessions()[msg.sessionId],
+            });
           } else {
             panel.webview.postMessage({
               type: "sessionsLoaded",
@@ -660,6 +914,15 @@ function activate(context) {
               sessionId: msg.sessionId,
               session: getAllSessions()[msg.sessionId],
             });
+            let declinedFilePath = "file";
+            if (session && session.messages[msg.messageIndex]) {
+              const fileEdits = session.messages[msg.messageIndex].fileEdits;
+              if (fileEdits && fileEdits[msg.fileIndex]) {
+                declinedFilePath = fileEdits[msg.fileIndex].filePath || "file";
+              }
+            }
+            const resumeMsg = `[TOOL VERIFICATION] User DECLINED file action on ${declinedFilePath}. The file was not modified.`;
+            resumeAgentFallback(resumeMsg);
           }
           break;
         }
@@ -814,6 +1077,7 @@ function activate(context) {
                         sessionId: msg.sessionId,
                         content: partialReply,
                       }),
+                    proposeFileWrite,
                     onFileWrite: async ({ filePath, code, isNew }) => {
                       try {
                         await writeAndSync(filePath, code, panel);
@@ -871,6 +1135,7 @@ function activate(context) {
                         sessionId: msg.sessionId,
                         content: partialReply,
                       }),
+                    proposeFileWrite,
                     onFileWrite: async ({ filePath, code, isNew }) => {
                       try {
                         await writeAndSync(filePath, code, panel);
@@ -932,11 +1197,6 @@ function activate(context) {
               "Terminal command declined. Re-plan and proceed.",
             );
           }
-          break;
-        }
-
-        case "clearAllSessions": {
-          clearAllSessions();
           break;
         }
 

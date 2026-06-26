@@ -23,6 +23,8 @@ export const useStore = create((set, get) => ({
   liveAgentState: null,
   streamingMessage: null,
   activeWorkspaceView: null, // { type: 'plan' | 'diff' | 'code', messageIndex, fileIndex? }
+  approvalMode: "balanced", // 'safe', 'balanced', 'strict'
+  devModeEnabled: true,
   // ── Task Execution Runtime state ───────────────────────────────────────
   executionProgress: null, // { planId, phases[], steps{}, runtimeState, checkpointedAt }
 
@@ -65,18 +67,115 @@ export const useStore = create((set, get) => ({
         });
       }
 
-      if (msg.type === "AGENT_STATE") {
-        set({
-          liveAgentState: {
-            phase: msg.phase,
-            currentStep: msg.currentStep,
-            activeTool: msg.activeTool,
-            executionStatus: msg.executionStatus,
-            totalSteps: msg.totalSteps,
-            budget: msg.budget,
-            lastResult: msg.lastResult,
-          },
+      if (msg.type === "JOURNAL_EVENT") {
+        set((state) => {
+          const event = msg.event;
+          let statusText = null;
+          switch (event.eventType) {
+            case "RequestStarted":
+              statusText = `[SYS] Starting task...`;
+              break;
+            case "PlanningStarted":
+              statusText = `[PLAN] Designing graph...`;
+              break;
+            case "PlanningFinished":
+              statusText = `[PLAN] Graph compiled.`;
+              break;
+            case "ToolStarted":
+              statusText = `[EXEC] Running ${event.data.tool}...`;
+              break;
+            case "ProposedEditCreated":
+              statusText = `[APPROVAL] Proposed edit for ${event.data.filePath}`;
+              break;
+            case "ProposedCommandCreated":
+              statusText = `[APPROVAL] Proposed command: ${event.data.command}`;
+              break;
+            case "ToolSucceeded":
+              const isFailed =
+                event.data.result && event.data.result.success === false;
+              statusText = isFailed
+                ? `[ERROR] Failed node ${event.data.nodeId}`
+                : `[EXEC] Completed node ${event.data.nodeId}`;
+              break;
+            case "ExecutionFinished":
+              statusText = event.data.success
+                ? `[SYS] Task complete.`
+                : `[SYS] Task failed.`;
+              break;
+          }
+          if (statusText) {
+            const hist = [...state.statusHistory];
+            const time = new Date().toLocaleTimeString();
+            const fullStatus = `[${time}] ${statusText}`;
+            if (hist.length === 0 || hist[hist.length - 1] !== fullStatus) {
+              hist.push(fullStatus);
+            }
+            return { status: statusText, statusHistory: hist };
+          }
+          return {};
         });
+      }
+
+      if (msg.type === "AGENT_STATE") {
+        set((state) => ({
+          liveAgentState: {
+            ...(state.liveAgentState || {}),
+            phase:
+              msg.phase !== undefined ? msg.phase : state.liveAgentState?.phase,
+            currentStep:
+              msg.currentStep !== undefined
+                ? msg.currentStep
+                : state.liveAgentState?.currentStep,
+            activeTool:
+              msg.activeTool !== undefined
+                ? msg.activeTool
+                : state.liveAgentState?.activeTool,
+            executionStatus:
+              msg.executionStatus !== undefined
+                ? msg.executionStatus
+                : state.liveAgentState?.executionStatus,
+            totalSteps:
+              msg.totalSteps !== undefined
+                ? msg.totalSteps
+                : state.liveAgentState?.totalSteps,
+            budget:
+              msg.budget !== undefined
+                ? msg.budget
+                : state.liveAgentState?.budget,
+            lastResult:
+              msg.lastResult !== undefined
+                ? msg.lastResult
+                : state.liveAgentState?.lastResult,
+            goal:
+              msg.goal !== undefined ? msg.goal : state.liveAgentState?.goal,
+            intent:
+              msg.intent !== undefined
+                ? msg.intent
+                : state.liveAgentState?.intent,
+            entities:
+              msg.entities !== undefined
+                ? msg.entities
+                : state.liveAgentState?.entities,
+            contextTokens:
+              msg.contextTokens !== undefined
+                ? msg.contextTokens
+                : state.liveAgentState?.contextTokens,
+            retrievedContext:
+              msg.retrievedContext !== undefined
+                ? msg.retrievedContext
+                : state.liveAgentState?.retrievedContext,
+            plan:
+              msg.plan !== undefined ? msg.plan : state.liveAgentState?.plan,
+            selectedSkills:
+              msg.selectedSkills !== undefined
+                ? msg.selectedSkills
+                : state.liveAgentState?.selectedSkills,
+            reflection:
+              msg.reflection !== undefined
+                ? msg.reflection
+                : state.liveAgentState?.reflection,
+          },
+        }));
       }
 
       // ── Task Execution Runtime progress ─────────────────────────────
@@ -129,25 +228,31 @@ export const useStore = create((set, get) => ({
           }
 
           const runtimeState =
-            msg.event === "RUNTIME_COMPLETE" ? "COMPLETED" :
-            msg.event === "RUNTIME_ABORTED"  ? "ABORTED" :
-            msg.event === "RUNTIME_PAUSED"   ? "PAUSED" :
-            msg.event === "RUNTIME_RESUMED"  ? "RUNNING" :
-            msg.event === "RUNTIME_ESCALATE" ? "FAILED" :
-            msg.event === "RUNTIME_START"    ? "RUNNING" :
-            (prev.runtimeState || "IDLE");
+            msg.event === "RUNTIME_COMPLETE"
+              ? "COMPLETED"
+              : msg.event === "RUNTIME_ABORTED"
+                ? "ABORTED"
+                : msg.event === "RUNTIME_PAUSED"
+                  ? "PAUSED"
+                  : msg.event === "RUNTIME_RESUMED"
+                    ? "RUNNING"
+                    : msg.event === "RUNTIME_ESCALATE"
+                      ? "FAILED"
+                      : msg.event === "RUNTIME_START"
+                        ? "RUNNING"
+                        : prev.runtimeState || "IDLE";
 
           return {
             executionProgress: {
               ...prev,
-              planId:        msg.planId || prev.planId,
-              phases:        msg.phases || prev.phases || [],
+              planId: msg.planId || prev.planId,
+              phases: msg.phases || prev.phases || [],
               steps,
               runtimeState,
-              totalSteps:    msg.totalSteps || prev.totalSteps || 0,
+              totalSteps: msg.totalSteps || prev.totalSteps || 0,
               checkpointedAt: msg.checkpointedAt || prev.checkpointedAt,
-              lastEvent:     msg.event,
-              lastEventAt:   msg.timestamp,
+              lastEvent: msg.event,
+              lastEventAt: msg.timestamp,
             },
           };
         });
@@ -246,6 +351,62 @@ export const useStore = create((set, get) => ({
         typeof open === "function" ? open(get().rightPanelOpen) : open,
     }),
   setActiveWorkspaceView: (view) => set({ activeWorkspaceView: view }),
+  setApprovalMode: (mode) => set({ approvalMode: mode }),
+  setDevModeEnabled: (enabled) => set({ devModeEnabled: enabled }),
+
+  handleMockRun: () => {
+    const states = [
+      { status: "CLASSIFYING", delay: 1000 },
+      { status: "PLANNING", delay: 2000 },
+      { status: "AWAITING_PLAN_APPROVAL", delay: 5000 }, // Wait for 5s
+      { status: "EXECUTING", delay: 3000 },
+      { status: "AWAITING_COMMAND_APPROVAL", delay: 3000 },
+      { status: "EXECUTING", delay: 2000 },
+      { status: "VERIFYING", delay: 2000 },
+      { status: "COMPLETED", delay: 1000 },
+      { status: "IDLE", delay: 1000 },
+    ];
+    let delayAccumulator = 0;
+    states.forEach(({ status, delay }) => {
+      setTimeout(() => {
+        set((state) => {
+          const hist = [...state.statusHistory];
+          if (hist.length === 0 || hist[hist.length - 1] !== status) {
+            hist.push(status);
+          }
+
+          // Also mock some progress data if executing
+          let executionProgress = state.executionProgress;
+          if (status === "EXECUTING") {
+            executionProgress = {
+              planId: "mock-plan-1",
+              steps: {
+                0: {
+                  status: "done",
+                  action: "Install dependencies",
+                  tool: "run_command",
+                },
+                1: {
+                  status: "running",
+                  action: "Modify auth.js",
+                  tool: "write_file",
+                },
+              },
+              runtimeState: "RUNNING",
+            };
+          } else if (status === "COMPLETED") {
+            executionProgress = {
+              ...executionProgress,
+              runtimeState: "COMPLETED",
+            };
+          }
+
+          return { status, statusHistory: hist, executionProgress };
+        });
+      }, delayAccumulator);
+      delayAccumulator += delay;
+    });
+  },
 
   handleNewSession: () => {
     const id = genId();
@@ -302,9 +463,15 @@ export const useStore = create((set, get) => ({
   },
 
   handleSend: ({ text, explicitFiles = [], attachedImages = [] } = {}) => {
+    console.log("[Jarvix Debug] store.handleSend started. Text:", text);
     const state = get();
     const question = typeof text === "string" ? text : "";
-    if (!question.trim()) return;
+    if (!question.trim()) {
+      console.log(
+        "[Jarvix Debug] store.handleSend aborted: question is empty.",
+      );
+      return;
+    }
 
     let sessionId = state.activeSessionId;
     let newSessions = { ...state.sessions };
@@ -313,7 +480,7 @@ export const useStore = create((set, get) => ({
       sessionId = genId();
       const newSession = {
         id: sessionId,
-        title: question.slice(0, 40),
+        title: question.trim().slice(0, 40) || "New Chat",
         messages: [],
         createdAt: Date.now(),
       };
@@ -329,6 +496,9 @@ export const useStore = create((set, get) => ({
     });
 
     if (vscode) {
+      console.log(
+        "[Jarvix Debug] store.handleSend: vscode is defined, posting 'ask' message.",
+      );
       vscode.postMessage({
         type: "ask",
         question,
@@ -339,28 +509,50 @@ export const useStore = create((set, get) => ({
         explicitFiles,
         attachedImages,
       });
+    } else {
+      console.log(
+        "[Jarvix Debug] store.handleSend: vscode API is null! Message not sent to extension.",
+      );
     }
   },
 
   handleStop: () => {
     if (vscode) vscode.postMessage({ type: "stopGeneration" });
-    set({ isLoading: false, status: null, statusHistory: [], executionProgress: null });
+    set({
+      isLoading: false,
+      status: null,
+      statusHistory: [],
+      executionProgress: null,
+    });
   },
 
   // ── Runtime control ────────────────────────────────────────────
   handleRuntimePause: () => {
     const state = get();
-    if (vscode) vscode.postMessage({ type: "runtimePause", sessionId: state.activeSessionId });
+    if (vscode)
+      vscode.postMessage({
+        type: "runtimePause",
+        sessionId: state.activeSessionId,
+      });
   },
 
   handleRuntimeResume: (modifiedSteps) => {
     const state = get();
-    if (vscode) vscode.postMessage({ type: "runtimeResume", sessionId: state.activeSessionId, modifiedSteps });
+    if (vscode)
+      vscode.postMessage({
+        type: "runtimeResume",
+        sessionId: state.activeSessionId,
+        modifiedSteps,
+      });
   },
 
   handleRuntimeAbort: () => {
     const state = get();
-    if (vscode) vscode.postMessage({ type: "runtimeAbort", sessionId: state.activeSessionId });
+    if (vscode)
+      vscode.postMessage({
+        type: "runtimeAbort",
+        sessionId: state.activeSessionId,
+      });
     set({ isLoading: false, status: null, statusHistory: [] });
   },
 
@@ -470,6 +662,7 @@ export const useStore = create((set, get) => ({
           isNew: edit.isNew,
           isDelete: edit.isDelete,
           originalCode: edit.originalCode,
+          _approvalId: edit._approvalId,
         });
       }
     }
@@ -483,6 +676,9 @@ export const useStore = create((set, get) => ({
         sessionId: state.activeSessionId,
         messageIndex,
         fileIndex,
+        _approvalId:
+          state.sessions[state.activeSessionId]?.messages[messageIndex]
+            ?.fileEdits[fileIndex]?._approvalId,
       });
     }
   },

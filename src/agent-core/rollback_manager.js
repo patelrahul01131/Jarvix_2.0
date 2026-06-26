@@ -10,7 +10,7 @@ const { eventBus, EVENTS } = require("../core/event_bus");
 class RollbackManager {
   constructor(workspaceRoot) {
     this.workspaceRoot = workspaceRoot;
-    this.backupDir = path.join(process.cwd(), '.jarvix', 'backups');
+    this.backupDir = path.join(this.workspaceRoot || process.cwd(), '.jarvix', 'backups');
     
     if (!fs.existsSync(this.backupDir)) {
       fs.mkdirSync(this.backupDir, { recursive: true });

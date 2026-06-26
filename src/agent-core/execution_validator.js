@@ -5,6 +5,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { observationStore } = require("./observation_store");
 
 async function runValidator(state, args) {
   if (args && args.onStatus)
@@ -18,6 +19,8 @@ async function runValidator(state, args) {
 
   // Track files created within the plan to avoid false positives in validation
   const simulatedFiles = new Set();
+  const dangerousCommands = ['rm -rf /', 'rm -rf /*', 'mkfs', 'dd if=', 'shutdown'];
+  const protectedDirs = ['/bin', '/boot', '/dev', '/etc', '/lib', '/sbin', '/sys', '/usr'];
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -44,11 +47,12 @@ async function runValidator(state, args) {
       tool === "fs.deleteFile" ||
       tool === "fs.renameFile"
     ) {
-      if (input.path) {
-        const fullPath = path.resolve(args.workspaceRoot, input.path);
+      const targetPath = input.oldPath || input.path;
+      if (targetPath) {
+        const fullPath = path.resolve(args.workspaceRoot, targetPath);
         if (!fs.existsSync(fullPath) && !simulatedFiles.has(fullPath)) {
           validationErrors.push(
-            `Step ${i + 1} (${tool}): Target file does not exist '${input.path}'`,
+            `Step ${i + 1} (${tool}): Target file does not exist '${targetPath}'`,
           );
         }
       }
@@ -74,6 +78,33 @@ async function runValidator(state, args) {
           }
         }
       }
+    }
+    
+    // 3. Command Safety Checks
+    if (tool === "terminal.exec" && input.cmd) {
+      const fullCmd = (input.cmd + " " + (input.args ? input.args.join(" ") : "")).toLowerCase();
+      
+      for (const dangerous of dangerousCommands) {
+        if (fullCmd.includes(dangerous)) {
+          validationErrors.push(`Step ${i + 1} (${tool}): Command rejected due to severe security risk ('${dangerous}').`);
+        }
+      }
+      
+      // Basic heuristic to prevent absolute path deletions outside workspace
+      if ((fullCmd.includes('rm ') || fullCmd.includes('del ')) && fullCmd.includes('/')) {
+        for (const pDir of protectedDirs) {
+          if (fullCmd.includes(` ${pDir}`)) {
+            validationErrors.push(`Step ${i + 1} (${tool}): Deletion targeting protected system directory ('${pDir}') is forbidden.`);
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Budget Check
+  if (state.executionBudget && state.taskMemory && state.taskMemory.pending) {
+    if (state.executionBudget.toolCalls >= state.executionBudget.maxToolCalls) {
+      validationErrors.push(`Plan Rejected: Execution budget exhausted (Max tool calls: ${state.executionBudget.maxToolCalls}). Please ask user for authorization to continue.`);
     }
   }
 

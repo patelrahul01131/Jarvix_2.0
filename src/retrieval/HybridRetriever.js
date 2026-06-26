@@ -450,18 +450,34 @@ function compressContext(ranked, maxChars = 40_000) {
   const root = getWorkspaceRoot();
   let context = '';
   let usedChars = 0;
-  const loadedFiles = new Set();
+  const loadedFiles = new Map();
 
   for (const r of ranked) {
     if (usedChars >= maxChars) break;
 
     let code = r.code || '';
-    if (!code && r.filePath && root && !loadedFiles.has(r.filePath)) {
+    if (r.filePath && root && !loadedFiles.has(r.filePath)) {
       try {
         const full = fs.readFileSync(path.join(root, r.filePath), 'utf8');
-        code = full.slice(0, 6000);
-        loadedFiles.add(r.filePath);
-      } catch {}
+        loadedFiles.set(r.filePath, full.split('\n'));
+      } catch {
+        loadedFiles.set(r.filePath, []);
+      }
+    }
+
+    if (!code && r.filePath && loadedFiles.has(r.filePath)) {
+      const lines = loadedFiles.get(r.filePath);
+      if (lines.length > 0) {
+        // Extract window if line numbers are known
+        if (r.startLine && r.endLine) {
+          const start = Math.max(0, r.startLine - 5);
+          const end = Math.min(lines.length, r.endLine + 5);
+          code = lines.slice(start, end).join('\n');
+        } else {
+          // fallback to front of file
+          code = lines.slice(0, 150).join('\n');
+        }
+      }
     }
 
     if (!code || !code.trim()) continue;
@@ -574,8 +590,8 @@ async function retrieve(query, options = {}) {
   // 1. Semantic search (even if stale — may still have useful results)
   if (useSemantic) {
     try {
-      const semanticResults = await semanticSearch(query, 50);
-      const mapped = semanticResults.map(r => ({
+      const semanticResponse = await semanticSearch(query, { limit: 50 });
+      const mapped = semanticResponse.results.map(r => ({
         filePath: r.filePath,
         name: r.name || '',
         chunkType: r.chunkType || 'file',

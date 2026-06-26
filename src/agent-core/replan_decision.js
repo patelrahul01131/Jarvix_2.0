@@ -85,6 +85,11 @@ async function runReplanDecision(state, args) {
     };
   }
 
+  // Preserve status if it's already a terminating/checkpoint state
+  if (state.status === "CHUNK_COMPLETE" || state.status === "DONE") {
+    return { status: state.status, decisionOutput: reflection };
+  }
+
   // Map reflection decision to next State Machine Node
   let nextStatus = "UNKNOWN";
   switch (decision) {

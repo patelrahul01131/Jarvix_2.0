@@ -1,64 +1,77 @@
 const EventEmitter = require('events');
 
 /**
- * EventBus Singleton
- * Decouples the Jarvix 4.0 architecture by routing domain events.
+ * Event Broker and Event Migration Layer (V7 Spec)
+ * Decouples conversation, scheduler, and workspace runtimes.
  */
-class EventBus extends EventEmitter {
+class EventBroker extends EventEmitter {
   constructor() {
     super();
-    // Increase limit for a busy agent system
-    this.setMaxListeners(50);
+    this.setMaxListeners(100);
+    this.journal = [];
   }
 
-  /**
-   * Strongly typed event emitter wrapper to enforce payload standards
-   */
-  emitEvent(eventName, payload) {
-    // Add standard metadata
-    const eventPayload = {
-      timestamp: new Date().toISOString(),
-      ...payload
+  // Event Migration Layer
+  migrateEvent(event) {
+    // Basic migration logic: ensure namespace naming convention
+    let eventName = event.eventName || event.eventType || "unknown";
+    
+    // Map legacy names to namespaces
+    if (eventName === "GoalCreated") eventName = "transaction.created";
+    if (eventName === "GoalCompleted") eventName = "transaction.committed";
+    if (eventName === "WaitingForApproval") eventName = "patch.generated";
+
+    return {
+      eventName,
+      schemaVersion: event.schemaVersion || 1,
+      payload: event.payload || event.data || {},
+      timestamp: event.timestamp || Date.now()
     };
-    this.emit(eventName, eventPayload);
+  }
+
+  emitEvent(eventName, payload) {
+    const rawEvent = {
+      eventName,
+      schemaVersion: 1,
+      payload,
+      timestamp: Date.now()
+    };
+    const migrated = this.migrateEvent(rawEvent);
+    this.emit(migrated.eventName, migrated);
+    this.emit("event", migrated); // Global stream
+  }
+
+  writeJournalEvent(correlationId, eventType, data) {
+    const rawEvent = {
+      correlationId,
+      eventType,
+      data,
+      timestamp: Date.now()
+    };
+    const migrated = this.migrateEvent(rawEvent);
+    this.journal.push(migrated);
+    this.emit(migrated.eventName, migrated);
+    this.emit("event", migrated);
+    return migrated;
+  }
+
+  getJournalForCorrelationId(correlationId) {
+    return this.journal.filter(e => e.payload.transactionId === correlationId || e.payload.correlationId === correlationId);
   }
 }
 
-// Export as a singleton
-const eventBus = new EventBus();
+const eventBus = new EventBroker();
 
-// Standard Event Names
 const EVENTS = {
-  GOAL_CREATED: 'GoalCreated',
-  GOAL_COMPLETED: 'GoalCompleted',
-  GOAL_PAUSED: 'GoalPaused',
-  GOAL_RESUMED: 'GoalResumed',
-  GOAL_FAILED: 'GoalFailed',
-  
-  BELIEF_UPDATED: 'BeliefUpdated',
-  BELIEF_SUPERSEDED: 'BeliefSuperseded',
-  
-  FAILURE_RECORDED: 'FailureRecorded',
-  LESSON_LEARNED: 'LessonLearned',
-  
-  LOCK_ACQUIRED: 'LockAcquired',
-  LOCK_RELEASED: 'LockReleased',
-  LOCK_ESCALATED: 'LockEscalated',
-  
-  ROLLBACK_TRIGGERED: 'RollbackTriggered',
-  SNAPSHOT_CREATED: 'SnapshotCreated',
-
-  // AgentActivityFeed Event Vocabulary
-  PLAN_CREATED: 'PlanCreated',
-  TASK_STARTED: 'TaskStarted',
-  PATCH_GROUP_CREATED: 'PatchGroupCreated',
-  WAITING_FOR_APPROVAL: 'WaitingForApproval',
-  PATCH_APPROVED: 'PatchApproved',
-  PATCH_REJECTED: 'PatchRejected',
-  PATCH_APPLIED: 'PatchApplied',
-  USER_FEEDBACK_RECEIVED: 'UserFeedbackReceived',
-  REPLAN_TRIGGERED: 'ReplanTriggered',
-  REFLECTION_COMPLETE: 'ReflectionComplete'
+  GOAL_CREATED: 'transaction.created',
+  GOAL_COMPLETED: 'transaction.committed',
+  GOAL_PAUSED: 'transaction.paused',
+  GOAL_RESUMED: 'transaction.resumed',
+  GOAL_FAILED: 'transaction.failed',
+  BELIEF_UPDATED: 'belief.updated',
+  LOCK_ACQUIRED: 'lock.acquired',
+  PATCH_GROUP_CREATED: 'patch.generated',
+  WAITING_FOR_APPROVAL: 'patch.waiting_approval'
 };
 
-module.exports = { eventBus, EVENTS };
+module.exports = { eventBus, EVENTS, EventBroker };

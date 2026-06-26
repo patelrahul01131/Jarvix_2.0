@@ -59,6 +59,9 @@ async function runReflection(state, args) {
 
   // 2. Deterministic Execution Rules
   if (obs.exitCode === 0 && obs.success !== false) {
+    if (action.tool === "response") {
+      return { reflection: { decision: "FINISH", reason: "Goal achieved and responded to user" }, status: "DONE" };
+    }
     if (action.tool === "fs.readFile" || action.tool === "fs.writeFile" || action.tool === "fs.editFile") {
       memoryManager.updateBelief(
         `file_state:${action.input.path}`, 
@@ -106,14 +109,28 @@ async function runReflection(state, args) {
   if (obs.success === false || obs.exitCode !== 0) {
     if (args && args.onStatus) args.onStatus(`[${new Date().toLocaleTimeString()}] 🧠 Analyzing complex error...`);
     try {
+      // Build a SAFE, compact summary — never embed raw file content which
+      // may contain literal newlines / control chars that break JSON.parse.
+      const safeAction = {
+        tool: action.tool || action.skill,
+        path: action.input && (action.input.path || action.input.oldPath),
+      };
+      const safeObs = {
+        success: obs.success,
+        exitCode: obs.exitCode,
+        // Truncate to avoid huge / unescaped content crashing JSON.parse
+        stderr: typeof obs.stderr === "string" ? obs.stderr.slice(0, 500) : "",
+        stdout: typeof obs.stdout === "string" ? obs.stdout.slice(0, 200) : "",
+      };
+
       const messages = [{
         role: "user",
-        content: `ACTION: ${JSON.stringify(action)}\n\nOBSERVATION: ${JSON.stringify(obs)}\n\nDetermine the next step: CONTINUE, RETRY, REPLAN, or ASK_USER. Output strictly JSON: {"decision": "...", "reason": "..."}. Escape all newlines in strings as \\n.`
+        content: `ACTION: ${JSON.stringify(safeAction)}\n\nOBSERVATION: ${JSON.stringify(safeObs)}\n\nDetermine the next step: CONTINUE, RETRY, REPLAN, or ASK_USER. Output strictly JSON: {"decision": "...", "reason": "..."}.`
       }];
       
       const { reply } = await callLLM({
         messages,
-        system: "You are a reflection engine. Output strictly valid JSON. Escape all newlines in strings as \\n. Example: {\"decision\": \"REPLAN\", \"reason\": \"Syntax error on line 42\"}",
+        system: "You are a reflection engine. Output strictly valid JSON. Example: {\"decision\": \"REPLAN\", \"reason\": \"Tool not found\"}",
         model: args.model,
         provider: args.provider,
         onChunk: null,

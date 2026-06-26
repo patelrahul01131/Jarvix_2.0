@@ -1,11 +1,41 @@
 /**
  * Observation Node
  * Normalizes raw tool execution output into deterministic structured data
- * before it reaches the Reflection layer.
+ * before it reaches the Reflection layer. Extracts facts for the Observation Store.
  */
 
+const { observationStore } = require('./observation_store');
+
+function extractFacts(obs, state) {
+  const facts = [];
+  const actionInput = state.action?.input || {};
+  
+  if (obs.tool === "fs.writeFile" && obs.success) {
+    facts.push({ source: obs.tool, tool: obs.tool, fact: `File created: ${obs.filesCreated[0]}`, value: true, confidence: 1.0 });
+  } else if (obs.tool === "fs.editFile" && obs.success) {
+    facts.push({ source: obs.tool, tool: obs.tool, fact: `File modified: ${obs.filesModified[0]}`, value: true, confidence: 1.0 });
+  } else if (obs.tool === "fs.readFile" && obs.success) {
+    facts.push({ source: obs.tool, tool: obs.tool, fact: `Read file: ${actionInput.path}`, value: true, confidence: 1.0 });
+  } else if (obs.tool === "grep_search" && obs.success) {
+    const hasResults = obs.stdout && obs.stdout.trim().length > 0 && !obs.stdout.includes("0 results");
+    facts.push({ 
+      source: obs.tool, 
+      tool: obs.tool, 
+      fact: `grep search for '${actionInput.query}' in ${actionInput.SearchPath}`, 
+      value: hasResults, 
+      confidence: 0.95 
+    });
+  } else if (obs.tool === "terminal.exec" && obs.success) {
+    facts.push({ source: obs.tool, tool: obs.tool, fact: `Command succeeded: ${actionInput.cmd}`, value: true, confidence: 0.9 });
+  } else if (obs.tool === "terminal.exec" && !obs.success) {
+    facts.push({ source: obs.tool, tool: obs.tool, fact: `Command failed: ${actionInput.cmd}`, value: false, confidence: 0.9 });
+  }
+
+  return facts;
+}
+
 function buildObservation(state, execRes) {
-  const tool = state.action ? state.action.tool : "unknown";
+  const tool = state.action ? (state.action.tool || state.action.skill) : "unknown";
   
   // Basic deterministic observation structure
   const observation = {
@@ -47,6 +77,13 @@ async function runObservation(state, args) {
     sess.messages.push({ role: "system", content: observationLog });
     require("../memory/shortTerm").saveSession(args.sessionId, sess);
   }
+
+  // ─── Extract and persist facts ────────────────────────────────────────────
+  const facts = extractFacts(observation, state);
+  for (const f of facts) {
+    observationStore.record(args.sessionId, f);
+  }
+  // ──────────────────────────────────────────────────────────────────────────
 
   return {
     structuredObservation: observation,

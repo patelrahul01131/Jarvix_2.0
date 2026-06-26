@@ -1,5 +1,6 @@
 const { eventBus, EVENTS } = require("../core/event_bus");
 const Belief = require("../core/models/belief");
+const { dbManager } = require("./database");
 
 /**
  * MemoryManager
@@ -40,6 +41,19 @@ class MemoryManager {
     if (!this.beliefs.has(key)) {
       const newBelief = new Belief({ key, currentValue: value, confidence });
       this.beliefs.set(key, newBelief);
+      
+      // Persist belief using DatabaseManager
+      if (dbManager) {
+        dbManager.upsertBelief({
+          key,
+          currentValue: value,
+          confidence,
+          history: newBelief.history || [],
+          superseded: newBelief.superseded || null,
+          lastVerified: new Date().toISOString()
+        });
+      }
+      
       eventBus.emitEvent(EVENTS.BELIEF_UPDATED, { key, value, reason });
       return newBelief;
     }
@@ -57,6 +71,19 @@ class MemoryManager {
     }
     
     belief.update(value, confidence, reason);
+    
+    // Persist belief using DatabaseManager
+    if (dbManager) {
+      dbManager.upsertBelief({
+        key,
+        currentValue: value,
+        confidence,
+        history: belief.history || [],
+        superseded: belief.superseded || null,
+        lastVerified: new Date().toISOString()
+      });
+    }
+    
     return belief;
   }
 

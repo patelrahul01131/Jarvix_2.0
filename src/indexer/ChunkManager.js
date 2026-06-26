@@ -20,6 +20,7 @@ const path = require('path');
  * @property {string} name          - Symbol name (function/class name) or file basename
  * @property {string} language      - Detected language
  * @property {string} code          - The actual source code of this chunk
+ * @property {string} [skeleton]    - Optional skeleton representation
  * @property {number} startLine     - 1-indexed start line
  * @property {number} endLine       - 1-indexed end line
  * @property {string[]} imports     - Import/require paths found in this chunk
@@ -228,44 +229,95 @@ function chunkJavaScript(code, filePath, language) {
 
 // ─── Split Python code into function/class chunks ─────────────────────────────
 function chunkPython(code, filePath) {
-  const lines = code.split('\n');
   const chunks = [];
-  let i = 0;
+  try {
+    const Parser = require('tree-sitter');
+    const Python = require('tree-sitter-python');
+    const parser = new Parser();
+    parser.setLanguage(Python);
 
-  while (i < lines.length) {
-    const line = lines[i];
-    const defMatch = line.match(/^(def|class)\s+(\w+)/);
+    const tree = parser.parse(code);
+    const lines = code.split('\n');
 
-    if (!defMatch) { i++; continue; }
+    function processNode(node) {
+      if (node.type === 'function_definition' || node.type === 'class_definition') {
+        const type = node.type === 'class_definition' ? 'class' : 'function';
+        
+        let nameNode = null;
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const child = node.namedChild(i);
+          if (child.type === 'identifier') {
+            nameNode = child;
+            break;
+          }
+        }
+        const name = nameNode ? code.substring(nameNode.startIndex, nameNode.endIndex) : 'unknown';
+        
+        const startLine = node.startPosition.row + 1;
+        const endLine = node.endPosition.row + 1;
+        const chunkCode = lines.slice(startLine - 1, endLine).join('\n');
 
-    const type = defMatch[1] === 'class' ? 'class' : 'function';
-    const name = defMatch[2];
-    const baseIndent = line.match(/^\s*/)[0].length;
-    const start = i;
-    i++;
+        chunks.push({
+          id: `${filePath}::${name}`,
+          filePath,
+          chunkType: type,
+          name,
+          language: 'python',
+          code: chunkCode,
+          startLine,
+          endLine,
+          imports: extractImports(chunkCode, 'python'),
+          exports: [],
+        });
+      }
 
-    // Collect all lines that are indented deeper than the def line
-    while (i < lines.length) {
-      const nextLine = lines[i];
-      if (nextLine.trim() === '') { i++; continue; }
-      const indent = nextLine.match(/^\s*/)[0].length;
-      if (indent <= baseIndent && nextLine.trim() !== '') break;
-      i++;
+      for (let i = 0; i < node.namedChildCount; i++) {
+        processNode(node.namedChild(i));
+      }
     }
 
-    const chunkCode = lines.slice(start, i).join('\n');
-    chunks.push({
-      id: `${filePath}::${name}`,
-      filePath,
-      chunkType: type,
-      name,
-      language: 'python',
-      code: chunkCode,
-      startLine: start + 1,
-      endLine: i,
-      imports: extractImports(chunkCode, 'python'),
-      exports: [],
-    });
+    processNode(tree.rootNode);
+
+  } catch (err) {
+    console.warn(`[ChunkManager] tree-sitter parsing failed for ${filePath}. Falling back to regex chunking.`, err.message);
+    const lines = code.split('\n');
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const defMatch = line.match(/^(def|class)\s+(\w+)/);
+
+      if (!defMatch) { i++; continue; }
+
+      const type = defMatch[1] === 'class' ? 'class' : 'function';
+      const name = defMatch[2];
+      const baseIndent = line.match(/^\s*/)[0].length;
+      const start = i;
+      i++;
+
+      // Collect all lines that are indented deeper than the def line
+      while (i < lines.length) {
+        const nextLine = lines[i];
+        if (nextLine.trim() === '') { i++; continue; }
+        const indent = nextLine.match(/^\s*/)[0].length;
+        if (indent <= baseIndent && nextLine.trim() !== '') break;
+        i++;
+      }
+
+      const chunkCode = lines.slice(start, i).join('\n');
+      chunks.push({
+        id: `${filePath}::${name}`,
+        filePath,
+        chunkType: type,
+        name,
+        language: 'python',
+        code: chunkCode,
+        startLine: start + 1,
+        endLine: i,
+        imports: extractImports(chunkCode, 'python'),
+        exports: [],
+      });
+    }
   }
 
   return chunks;

@@ -1,77 +1,55 @@
-import { useState } from 'react';
-import ContextPanel from './ContextPanel';
-import MemoryDashboard from './MemoryDashboard';
-import TimelinePanel from './TimelinePanel';
-import DeveloperToolsPanel from './DeveloperToolsPanel';
-import TelemetryPanel from './TelemetryPanel';
+import React, { useState } from 'react';
 
-const TABS = [
-  { id: 'telemetry', label: 'Telemetry', icon: '⚡' },
-  { id: 'context',  label: 'Context',  icon: '🎯' },
-  { id: 'memory',   label: 'Memory',   icon: '🧠' },
-  { id: 'timeline', label: 'Timeline', icon: '⏱️' },
-  { id: 'dev',      label: 'Dev Tools', icon: '🛠️' }
-];
+import PlanTab from './tabs/PlanTab';
+import ChangesTab from './tabs/ChangesTab';
+import CommandsTab from './tabs/CommandsTab';
+import ObservationsTab from './tabs/ObservationsTab';
+import WorldStateTab from './tabs/WorldStateTab';
+import ActivityTab from './tabs/ActivityTab';
+import ContextTab from './tabs/ContextTab';
+import BeliefsTab from './tabs/BeliefsTab';
 
-export default function RightPanel({
-  statusHistory,
-  isLoading,
-  messages,
-  session,
-  workspaceFiles,
-  liveAgentState,
-}) {
-  const [activeTab, setActiveTab] = useState('telemetry');
+export default function RightPanel({ session, messages, devMode = true }) {
+  const [activeTab, setActiveTab] = useState('plan');
+
+  const tabs = [
+    { id: 'plan', label: 'Plan', icon: 'list-flat' },
+    { id: 'changes', label: 'Changes', icon: 'git-compare' },
+    { id: 'commands', label: 'Commands', icon: 'terminal' },
+    { id: 'observations', label: 'Observations', icon: 'eye' },
+    { id: 'world_state', label: 'World State', icon: 'globe' },
+    { id: 'activity', label: 'Activity', icon: 'history' },
+    { id: 'context', label: 'Context', icon: 'symbol-misc' }
+  ];
+
+  if (devMode) {
+    tabs.push({ id: 'beliefs', label: 'Beliefs', icon: 'lightbulb' });
+  }
 
   return (
     <div className="right-panel">
-      {/* Tab bar */}
-      <div className="right-panel-header">
-        {TABS.map(tab => (
+      <div className="tabs-header">
+        {tabs.map(tab => (
           <button
             key={tab.id}
-            className={`right-tab ${activeTab === tab.id ? 'active' : ''}`}
+            className={`tab-btn ${activeTab === tab.id ? 'active' : ''}`}
             onClick={() => setActiveTab(tab.id)}
             title={tab.label}
           >
-            {tab.icon} {tab.label}
+            <i className={`codicon codicon-${tab.icon}`}></i>
           </button>
         ))}
       </div>
-
-      {/* Tab content */}
-      <div className="right-panel-content" style={{ flex: 1, overflowY: 'auto' }}>
-        {activeTab === 'telemetry' && (
-          <TelemetryPanel
-            liveAgentState={liveAgentState}
-            session={session}
-          />
-        )}
-        {activeTab === 'context' && (
-          <ContextPanel
-            statusHistory={statusHistory}
-            messages={messages}
-            session={session}
-            isLoading={isLoading}
-          />
-        )}
-        {activeTab === 'memory' && (
-          <MemoryDashboard
-            session={session}
-            messages={messages}
-          />
-        )}
-        {activeTab === 'timeline' && (
-          <TimelinePanel
-            session={session}
-          />
-        )}
-        {activeTab === 'dev' && (
-          <DeveloperToolsPanel
-            session={session}
-            messages={messages}
-          />
-        )}
+      
+      <div className="tab-content">
+        {activeTab === 'plan' && <PlanTab plan={session?.pendingPlan} />}
+        {activeTab === 'changes' && <ChangesTab changes={session?.changes} />}
+        {activeTab === 'commands' && <CommandsTab commands={session?.commands} />}
+        {activeTab === 'observations' && <ObservationsTab observations={session?.observations} />}
+        {activeTab === 'world_state' && <WorldStateTab worldState={session?.worldState} />}
+        {activeTab === 'activity' && <ActivityTab activities={session?.activities} />}
+        {activeTab === 'context' && <ContextTab contextData={session?.contextData} />}
+        {activeTab === 'beliefs' && <BeliefsTab beliefs={session?.beliefs} />}
       </div>
     </div>
   );

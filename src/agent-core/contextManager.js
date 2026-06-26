@@ -3,18 +3,12 @@
  * Handles lazy-loading of context to prevent "Needle in a Haystack" issues.
  */
 
-const { TOOL_REGISTRY } = require("./toolRegistry");
+const { buildThinkerContext, buildToolContext } = require("./context_builder");
 
+// Legacy sync shim for backwards compatibility where needed
 function buildMinimalContext(state) {
   // Extract just the available tool schemas and risk profiles
-  const availableTools = Object.keys(TOOL_REGISTRY).reduce((acc, key) => {
-    acc[key] = {
-      description: TOOL_REGISTRY[key].description,
-      schema: TOOL_REGISTRY[key].schema,
-      risk: TOOL_REGISTRY[key].risk
-    };
-    return acc;
-  }, {});
+  const availableTools = buildToolContext();
 
   // Extract recent action history
   let lastActions = [];

@@ -9,24 +9,24 @@ const {
   THINKER_SYSTEM_PROMPT,
   ACTOR_SYSTEM_PROMPT,
 } = require("../rules/prompts");
-const { buildMinimalContext } = require("./contextManager");
+const { buildThinkerContext } = require("./context_builder");
 const { z } = require("zod");
 
 // Define strict Actor schema
-const ToolCallSchema = z.object({
-  tool: z.string(),
+const SkillCallSchema = z.object({
+  skill: z.string(),
   input: z.record(z.any()),
 });
-const ActorResponseSchema = z.array(ToolCallSchema);
+const ActorResponseSchema = z.array(SkillCallSchema);
 
 async function runThinker(state, args) {
   const { onStatus, signal } = args;
   if (onStatus) onStatus("🧠 Thinker: Analyzing situation...");
 
-  const minContext = buildMinimalContext(state);
+  const minContext = await buildThinkerContext(state, args);
 
   // Format history
-  const historyText = minContext.lastActions.join("\n");
+  const historyText = minContext.recentMessages.join("\n");
 
   // ─── Episodic context from attentive memory ───────────────────────────────
   // state.episodicContext is populated by thinkerNode in loop.js via getAttentiveMemory().
@@ -45,20 +45,49 @@ async function runThinker(state, args) {
     ? `\n> ⚠️ Note: Conversation history was compressed at ${new Date(compressionBelief.currentValue).toLocaleTimeString()}. Past details exist only as episode summaries above.\n`
     : "";
 
+  // ─── Format new context elements ──────────────────────────────────────────
+  let beliefsText = "No active beliefs.";
+  if (minContext.beliefs && minContext.beliefs.length > 0) {
+    beliefsText = minContext.beliefs
+      .filter(b => b.confidence > 0.3)
+      .map(b => `- [${(b.confidence * 100).toFixed(0)}% sure] ${b.key}: ${b.value}`)
+      .join('\n');
+  } else if (args.memoryManager && typeof args.memoryManager.getAllBeliefs === 'function') {
+    // Fallback directly to memory manager if context builder missed it
+    const allBeliefs = args.memoryManager.getAllBeliefs();
+    if (allBeliefs.length > 0) {
+      beliefsText = allBeliefs
+        .filter(b => b.confidence > 0.3)
+        .map(b => `- [${(b.confidence * 100).toFixed(0)}% sure] ${b.key}: ${b.value}`)
+        .join('\n');
+    }
+  }
+
+  let observationsText = "No recent observations.";
+  if (minContext.observations && minContext.observations.length > 0) {
+    observationsText = minContext.observations
+      .map(o => `- [${o.source}] ${o.fact}`)
+      .join('\n');
+  }
+
+  let workspaceStateText = "Unknown architecture.";
+  if (minContext.workspaceState && Object.keys(minContext.workspaceState).length > 1) {
+    workspaceStateText = JSON.stringify(minContext.workspaceState, null, 2);
+  }
+
   // Render system prompt
   let systemPrompt = THINKER_SYSTEM_PROMPT.replace(
     "{{goal}}",
     minContext.goal || "No active goal",
   )
     .replace("{{history}}", historyText || "No previous actions.")
-    .replace("{{relevantMemory}}", minContext.relevantMemory ? JSON.stringify(minContext.relevantMemory, null, 2) : "{}")
-    .replace("{{episodicContext}}", episodicSection + compressionNote);
+    .replace("{{currentIntent}}", JSON.stringify(minContext.currentIntent || {}, null, 2))
+    .replace("{{workingMemory}}", JSON.stringify(minContext.workingMemory || {}, null, 2))
+    .replace("{{plan}}", JSON.stringify(minContext.plan || [], null, 2))
+    .replace("{{contextFeed}}", JSON.stringify(minContext.contextFeed || [], null, 2));
 
-  // If the prompt template doesn't have the placeholder yet, append the
-  // episodic section at the end so it always reaches the model.
-  if (!THINKER_SYSTEM_PROMPT.includes("{{episodicContext}}") && (episodicSection || compressionNote)) {
-    systemPrompt += episodicSection + compressionNote;
-  }
+  // Note: episodic context is now naturally fed via the contextFeed!
+  // No need to append it manually anymore.
 
   const messages = [
     {
@@ -71,8 +100,8 @@ async function runThinker(state, args) {
     const res = await callLLM({
       messages,
       system: systemPrompt,
-      model: args.model || "gpt-4o",
-      provider: args.provider || "openai",
+      model: args.model || "gemini-2.5-pro",
+      provider: args.provider || "gemini",
       onChunk: null, // Don't stream thought directly to UI, wait for action
       signal,
     });
@@ -87,9 +116,9 @@ async function runThinker(state, args) {
 
 async function runActor(state, args, thought) {
   const { onStatus, signal } = args;
-  if (onStatus) onStatus("🤖 Actor: Generating execution tool calls...");
+  if (onStatus) onStatus("🤖 Actor: Generating execution skill calls...");
 
-  const minContext = buildMinimalContext(state);
+  const minContext = await buildThinkerContext(state, args);
 
   // Format tools for prompt
   let toolsText = "";
@@ -106,7 +135,7 @@ async function runActor(state, args, thought) {
     {
       role: "user",
       content:
-        "Based on the Thinker's reasoning, provide the JSON array of tool calls. Return ONLY valid JSON.",
+        "Based on the Thinker's reasoning, provide the JSON array of skill calls. Return ONLY valid JSON.",
     },
   ];
 
@@ -123,8 +152,8 @@ async function runActor(state, args, thought) {
       const res = await callLLM({
         messages,
         system: systemPrompt,
-        model: args.model || "gpt-4o",
-        provider: args.provider || "openai",
+        model: args.model || "gemini-2.5-pro",
+        provider: args.provider || "gemini",
         onChunk: null,
         signal,
       });
@@ -190,10 +219,10 @@ async function runActor(state, args, thought) {
         });
       } else {
         console.error(
-          "[Actor] Hard failure. Could not generate valid tool calls.",
+          "[Actor] Hard failure. Could not generate valid skill calls.",
         );
         throw new Error(
-          `Actor JSON validation failed permanently: ${err.message}`,
+          `Failed to parse Actor output as valid JSON after multiple attempts. The agent loop cannot proceed. Error: ${err.message}`,
         );
       }
     }
